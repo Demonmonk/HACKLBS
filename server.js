@@ -457,7 +457,7 @@ app.get("*", (_req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`AegisGrid hackathon MVP running on http://localhost:${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`AegisGrid hackathon MVP running on http://0.0.0.0:${PORT}`);
   console.log(`OpenAI enabled: ${Boolean(OPENAI_API_KEY)} (set OPENAI_API_KEY to enable)`);
 });
