@@ -66,6 +66,7 @@ function saveReports(reports) {
 }
 
 function setStatus(el, msg) {
+  if (!el) return;
   el.textContent = msg || "";
 }
 
