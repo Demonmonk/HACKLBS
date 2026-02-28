@@ -505,6 +505,54 @@ function riskColor(score) {
   return "#e53935";
 }
 
+// ---- Detour waypoint computation ----
+
+// Returns reports within `radiusM` metres of any coord in a route geometry
+function reportsNearRoute(coords, reports, radiusM = 280) {
+  const near = new Set();
+  for (const r of reports) {
+    for (const [lon, lat] of coords) {
+      if (haversineMeters({ lat, lon }, r) <= radiusM) {
+        near.add(r);
+        break;
+      }
+    }
+  }
+  return [...near];
+}
+
+// Weighted centroid of reports (severity = weight)
+function dangerCentroid(reports) {
+  let wLat = 0, wLon = 0, total = 0;
+  for (const r of reports) {
+    const w = Number(r.severity) || 2;
+    wLat += r.lat * w;
+    wLon += r.lon * w;
+    total += w;
+  }
+  return total > 0 ? { lat: wLat / total, lon: wLon / total } : null;
+}
+
+// Given a direct route and its nearby danger centroid, compute a waypoint
+// that steers the route AWAY from the danger zone.
+// `offsetDeg` ≈ degrees offset (0.008 ≈ ~700m, adjustable).
+function computeDetourWaypoint(coords, centroid, offsetDeg = 0.009) {
+  // Use the midpoint of the route as the pivot
+  const mid = coords[Math.floor(coords.length / 2)];
+  const [midLon, midLat] = mid;
+
+  // Vector FROM danger centroid TO route midpoint (i.e. away from danger)
+  const dx = midLon - centroid.lon;
+  const dy = midLat - centroid.lat;
+  const len = Math.sqrt(dx * dx + dy * dy) || 0.0001;
+
+  // Normalise and scale to desired offset
+  const waypointLon = midLon + (dx / len) * offsetDeg;
+  const waypointLat = midLat + (dy / len) * offsetDeg;
+
+  return { lat: waypointLat, lon: waypointLon };
+}
+
 // Draw a route as coloured segments (heatmap) based on per-point risk.
 // Each segment gets a colour from green → red depending on how close
 // it is to community reports.  Returns an array of L.polyline layers.
@@ -532,6 +580,41 @@ function drawHeatmapRoute(coords, reports, map, opacity = 0.92) {
   return layers;
 }
 
+// Draw one route on the map (underline + heatmap + invisible click layer)
+function drawRoute(coords, reports, map, { clickPopupHtml, underlineColor = "#111" } = {}) {
+  const layers = [];
+  const latlngs = coords.map(([lo, la]) => [la, lo]);
+
+  const under = L.polyline(latlngs, { color: underlineColor, weight: 10, opacity: 0.32 }).addTo(map);
+  layers.push(under);
+
+  const heat = drawHeatmapRoute(coords, reports, map);
+  layers.push(...heat);
+
+  if (clickPopupHtml) {
+    const click = L.polyline(latlngs, { color: "transparent", weight: 22, opacity: 0 })
+      .bindPopup(clickPopupHtml)
+      .addTo(map);
+    layers.push(click);
+  }
+  return layers;
+}
+
+// Draw a plain solid-coloured route (for the fastest/red path)
+function drawSolidRoute(coords, color, map, { clickPopupHtml } = {}) {
+  const layers = [];
+  const latlngs = coords.map(([lo, la]) => [la, lo]);
+
+  const under = L.polyline(latlngs, { color: "#111", weight: 10, opacity: 0.32 }).addTo(map);
+  layers.push(under);
+
+  const line = L.polyline(latlngs, { color, weight: 7, opacity: 0.88 }).addTo(map);
+  if (clickPopupHtml) line.bindPopup(clickPopupHtml);
+  layers.push(line);
+
+  return layers;
+}
+
 async function computeRoutes() {
   if (!state.userPos) {
     setStatus($("routeStatus"), "Set a start location first — use your location or pick on map.");
@@ -543,169 +626,156 @@ async function computeRoutes() {
   }
 
   clearRouteLines();
-  setStatus($("routeStatus"), "Fetching routes…");
-  showOverlay("Routing…");
+  setStatus($("routeStatus"), "Loading reports…");
+  showOverlay("Computing…");
 
-  const start = `${state.userPos.lon},${state.userPos.lat}`;
-  const end   = `${state.destPos.lon},${state.destPos.lat}`;
+  const startStr = `${state.userPos.lon},${state.userPos.lat}`;
+  const endStr   = `${state.destPos.lon},${state.destPos.lat}`;
 
   try {
-    // Always reload latest reports before scoring
+    // ── 1. Always reload latest reports ──
     const freshReports = await loadReportsFromServer();
     state.reports = freshReports;
     renderReports();
 
-    const data = await apiGet(
-      `/api/route?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&alternatives=3`
-    );
+    setStatus($("routeStatus"), "Fetching direct route…");
 
-    if (data.code !== "Ok" || !Array.isArray(data.routes) || !data.routes.length) {
-      throw new Error("No routes returned by the router.");
+    // ── 2. Fetch direct route (fastest) ──
+    const directData = await apiGet(
+      `/api/route?start=${encodeURIComponent(startStr)}&end=${encodeURIComponent(endStr)}&alternatives=1`
+    );
+    if (directData.code !== "Ok" || !directData.routes?.length) {
+      throw new Error("No route returned by the router.");
+    }
+    const directRoute  = directData.routes[0];
+    const directCoords = directRoute.geometry.coordinates;
+    const directRisk   = routeRisk(directRoute.geometry, state.reports);
+    const directMin    = minutes(directRoute.duration);
+
+    // ── 3. Check if any reports lie near the direct route ──
+    const nearbyDanger = reportsNearRoute(directCoords, state.reports, 280);
+    const centroid     = dangerCentroid(nearbyDanger);
+
+    let safeCoords = null, safeRisk = 0, safeMin = 0, detourAttempted = false;
+
+    if (centroid && nearbyDanger.length > 0) {
+      setStatus($("routeStatus"), `Found ${nearbyDanger.length} report(s) near your route — computing safe detour…`);
+      detourAttempted = true;
+
+      // Try progressively larger offsets until we get a meaningfully different route
+      const OFFSETS = [0.008, 0.013, 0.020];
+      for (const offset of OFFSETS) {
+        const wp = computeDetourWaypoint(directCoords, centroid, offset);
+        const viaStr = `${wp.lon.toFixed(6)},${wp.lat.toFixed(6)}`;
+        try {
+          const detourData = await apiGet(
+            `/api/route?start=${encodeURIComponent(startStr)}&via=${encodeURIComponent(viaStr)}&end=${encodeURIComponent(endStr)}`
+          );
+          if (detourData.code !== "Ok" || !detourData.routes?.length) continue;
+
+          const candidate      = detourData.routes[0];
+          const candidateCoords = candidate.geometry.coordinates;
+          const candidateRisk  = routeRisk(candidate.geometry, state.reports);
+
+          // Accept this detour if it's at least 5 risk points safer
+          // (even a modest improvement is worth showing)
+          if (candidateRisk < directRisk - 5) {
+            safeCoords = candidateCoords;
+            safeRisk   = candidateRisk;
+            safeMin    = minutes(candidate.duration);
+            break;
+          }
+        } catch { /* try next offset */ }
+      }
     }
 
-    // Score every candidate route
-    const scored = data.routes.map((r, i) => ({
-      route: r,
-      index: i,
-      risk: routeRisk(r.geometry, state.reports),
-      durationMin: minutes(r.duration),
-      coords: r.geometry.coordinates,
-    }));
-
-    // Fastest = lowest duration; safest = lowest risk (tie-break: shorter)
-    const fastest = [...scored].sort((a, b) => a.route.duration - b.route.duration)[0];
-    const safest  = [...scored].sort((a, b) => (a.risk - b.risk) || (a.route.duration - b.route.duration))[0];
-    const sameRoute = fastest.index === safest.index;
     const hasReports = state.reports.length > 0;
+    const allLatLons = [...directCoords.map(([lo, la]) => [la, lo])];
 
-    if (sameRoute) {
-      // ── Single route: draw as risk heatmap so reports are visually reflected ──
-      // Dark underline for readability
-      const underline = L.polyline(
-        fastest.coords.map(([lo, la]) => [la, lo]),
-        { color: "#111", weight: 10, opacity: 0.35 }
-      ).addTo(state.map);
-      state.routeLayers.push(underline);
+    if (safeCoords) {
+      // ── Two distinct paths: 🔴 fastest (direct) vs 🟢 safest (detour) ──
 
-      // Heatmap segments — green where safe, red where near reports
-      const heatLayers = drawHeatmapRoute(fastest.coords, state.reports, state.map);
-      state.routeLayers.push(...heatLayers);
+      // Draw direct/fastest first (red, behind)
+      const fLayers = drawSolidRoute(directCoords, "#e53935", state.map, {
+        clickPopupHtml: `<div class="popup-route">
+          <b style="color:#ef9a9a">🔴 Fastest (direct)</b><br/>
+          ${escapeHtml(String(directMin))} min &nbsp;·&nbsp;
+          <span style="color:${riskColor(directRisk)}">Risk: ${Math.round(directRisk)}/100 (${riskLabel(directRisk)})</span><br/>
+          <span style="color:#aaa;font-size:11px">Passes near ${nearbyDanger.length} reported incident(s)</span>
+        </div>`,
+      });
+      state.routeLayers.push(...fLayers);
 
-      // Invisible wide clickable line for popup
-      const clickLine = L.polyline(
-        fastest.coords.map(([lo, la]) => [la, lo]),
-        { color: "transparent", weight: 20, opacity: 0 }
-      ).bindPopup(
-        `<div class="popup-route">
-          <b>${hasReports ? "Route risk heatmap" : "Route (no reports yet)"}</b><br/>
-          ${escapeHtml(String(fastest.durationMin))} min &nbsp;·&nbsp;
-          <span style="color:${riskColor(fastest.risk)}">
-            Overall risk: ${Math.round(fastest.risk)}/100 (${riskLabel(fastest.risk)})
-          </span>
-          <br/><span style="color:#aaa;font-size:11px">
-            ${hasReports
-              ? "🟢 Green = safe &nbsp; 🟡 Yellow = moderate &nbsp; 🔴 Red = near reports"
-              : "Add reports on the Report tab to see risk colouring"}
-          </span>
-        </div>`
-      ).addTo(state.map);
-      state.routeLayers.push(clickLine);
+      // Draw safe detour on top (heatmap so you see the remaining risk)
+      const sLayers = drawRoute(safeCoords, state.reports, state.map, {
+        clickPopupHtml: `<div class="popup-route">
+          <b style="color:#a5d6a7">🟢 Safest (detour)</b><br/>
+          ${escapeHtml(String(safeMin))} min &nbsp;·&nbsp;
+          <span style="color:${riskColor(safeRisk)}">Risk: ${Math.round(safeRisk)}/100 (${riskLabel(safeRisk)})</span><br/>
+          <span style="color:#aaa;font-size:11px">🟢 safe · 🟡 moderate · 🔴 near report</span>
+        </div>`,
+      });
+      state.routeLayers.push(...sLayers);
 
-      const fitCoords = fastest.coords.map(([lo, la]) => [la, lo]);
-      state.map.fitBounds(L.polyline(fitCoords).getBounds().pad(0.2));
+      allLatLons.push(...safeCoords.map(([lo, la]) => [la, lo]));
+      state.map.fitBounds(L.polyline(allLatLons).getBounds().pad(0.2));
+
+      const extraMin = Math.round((safeMin - directMin) * 10) / 10;
+      const riskSaved = Math.round(directRisk - safeRisk);
 
       $("fastestKpi").innerHTML =
-        `${fastest.durationMin} min<br/>` +
-        `<span style="color:${riskColor(fastest.risk)};font-size:12px">` +
-        `Risk ${Math.round(fastest.risk)}/100 — ${riskLabel(fastest.risk)}</span>`;
+        `<span style="color:#ef9a9a">🔴</span> ${directMin} min<br/>` +
+        `<span style="color:${riskColor(directRisk)};font-size:12px">Risk ${Math.round(directRisk)}/100 — ${riskLabel(directRisk)}</span>`;
 
       $("safestKpi").innerHTML =
-        `<span style="color:var(--muted);font-size:13px">` +
-        (data.routes.length === 1
-          ? "Only 1 path found<br/>Route coloured by risk"
-          : "All paths score equally<br/>Route coloured by risk") +
-        `</span>`;
+        `<span style="color:#a5d6a7">🟢</span> ${safeMin} min<br/>` +
+        `<span style="color:${riskColor(safeRisk)};font-size:12px">Risk ${Math.round(safeRisk)}/100 — ${riskLabel(safeRisk)}</span>`;
 
       setStatus($("routeStatus"),
-        hasReports
-          ? `Route coloured by risk — 🟢 safe sections, 🟡 moderate, 🔴 near ${state.reports.length} report(s). Overall risk: ${Math.round(fastest.risk)}/100.`
-          : `Route shown — no community reports yet. Add reports to see risk colouring.`
+        `🔴 Direct: ${directMin} min, risk ${Math.round(directRisk)}/100 — passes ${nearbyDanger.length} incident(s). ` +
+        `🟢 Safe detour: ${safeMin} min, risk ${Math.round(safeRisk)}/100 — avoids danger zone` +
+        (extraMin > 0 ? `, adds ${extraMin} min.` : ".")
       );
 
     } else {
-      // ── Two distinct routes: fastest (red solid) vs safest (heatmap) ──
+      // ── Single route (heatmap) — no significant detour possible ──
+      const reason = !hasReports
+        ? "No reports yet — add some to enable safe routing."
+        : !detourAttempted
+          ? `Route scores ${Math.round(directRisk)}/100 — no reported danger zones nearby.`
+          : `Detour found no safer alternative (risk difference < 5 points).`;
 
-      // Fastest: dark underline + solid red
-      const fUnder = L.polyline(
-        fastest.coords.map(([lo, la]) => [la, lo]),
-        { color: "#111", weight: 10, opacity: 0.35 }
-      ).addTo(state.map);
-      state.routeLayers.push(fUnder);
+      const singleLayers = drawRoute(directCoords, state.reports, state.map, {
+        clickPopupHtml: `<div class="popup-route">
+          <b>${hasReports ? "Route risk heatmap" : "Route"}</b><br/>
+          ${escapeHtml(String(directMin))} min &nbsp;·&nbsp;
+          <span style="color:${riskColor(directRisk)}">Risk: ${Math.round(directRisk)}/100 (${riskLabel(directRisk)})</span><br/>
+          <span style="color:#aaa;font-size:11px">
+            ${hasReports ? "🟢 safe · 🟡 moderate · 🔴 near report" : "Add reports to see risk colouring"}
+          </span>
+        </div>`,
+      });
+      state.routeLayers.push(...singleLayers);
 
-      const fastestLine = L.polyline(
-        fastest.coords.map(([lo, la]) => [la, lo]),
-        { color: "#e53935", weight: 7, opacity: 0.88 }
-      ).bindPopup(
-        `<div class="popup-route">
-          <b style="color:#ef9a9a">🔴 Fastest route</b><br/>
-          ${escapeHtml(String(fastest.durationMin))} min &nbsp;·&nbsp;
-          <span style="color:${riskColor(fastest.risk)}">Risk: ${Math.round(fastest.risk)}/100 (${riskLabel(fastest.risk)})</span>
-        </div>`
-      ).addTo(state.map);
-      state.routeLayers.push(fastestLine);
-
-      // Safest: dark underline + heatmap segments
-      const sUnder = L.polyline(
-        safest.coords.map(([lo, la]) => [la, lo]),
-        { color: "#111", weight: 10, opacity: 0.35 }
-      ).addTo(state.map);
-      state.routeLayers.push(sUnder);
-
-      const heatLayers = drawHeatmapRoute(safest.coords, state.reports, state.map);
-      state.routeLayers.push(...heatLayers);
-
-      // Clickable overlay for safest popup
-      const sClickLine = L.polyline(
-        safest.coords.map(([lo, la]) => [la, lo]),
-        { color: "transparent", weight: 20, opacity: 0 }
-      ).bindPopup(
-        `<div class="popup-route">
-          <b style="color:#a5d6a7">🟢 Safest route</b><br/>
-          ${escapeHtml(String(safest.durationMin))} min &nbsp;·&nbsp;
-          <span style="color:${riskColor(safest.risk)}">Risk: ${Math.round(safest.risk)}/100 (${riskLabel(safest.risk)})</span>
-          <br/><span style="color:#aaa;font-size:11px">Coloured by section risk</span>
-        </div>`
-      ).addTo(state.map);
-      state.routeLayers.push(sClickLine);
-
-      const allLatLons = [
-        ...fastest.coords.map(([lo, la]) => [la, lo]),
-        ...safest.coords.map(([lo, la]) => [la, lo]),
-      ];
       state.map.fitBounds(L.polyline(allLatLons).getBounds().pad(0.2));
 
       $("fastestKpi").innerHTML =
-        `<span style="color:#ef9a9a">🔴</span> ${fastest.durationMin} min<br/>` +
-        `<span style="color:${riskColor(fastest.risk)};font-size:12px">` +
-        `Risk ${Math.round(fastest.risk)}/100 — ${riskLabel(fastest.risk)}</span>`;
+        `${directMin} min<br/>` +
+        `<span style="color:${riskColor(directRisk)};font-size:12px">Risk ${Math.round(directRisk)}/100 — ${riskLabel(directRisk)}</span>`;
 
       $("safestKpi").innerHTML =
-        `<span style="color:#a5d6a7">🟢</span> ${safest.durationMin} min<br/>` +
-        `<span style="color:${riskColor(safest.risk)};font-size:12px">` +
-        `Risk ${Math.round(safest.risk)}/100 — ${riskLabel(safest.risk)}</span>`;
+        `<span style="color:var(--muted);font-size:12px">${escapeHtml(reason)}</span>`;
 
-      const extraMin = Math.round((safest.durationMin - fastest.durationMin) * 10) / 10;
-      const riskDiff = Math.round(fastest.risk - safest.risk);
       setStatus($("routeStatus"),
-        `🔴 Fastest: ${fastest.durationMin} min, risk ${Math.round(fastest.risk)}/100 · ` +
-        `🟢 Safest (heatmap): ${safest.durationMin} min, risk ${Math.round(safest.risk)}/100. ` +
-        `Safest avoids ${riskDiff} risk points${extraMin > 0 ? `, adds ${extraMin} min` : ""}.`
+        hasReports
+          ? `${reason} Route coloured by risk — 🟢 safe · 🟡 moderate · 🔴 near reports.`
+          : reason
       );
     }
 
     state.lastRouteSummary = {
-      fastest: { durationMin: fastest.durationMin, risk: Math.round(fastest.risk) },
-      safest:  { durationMin: safest.durationMin,  risk: Math.round(safest.risk) },
+      fastest: { durationMin: directMin, risk: Math.round(directRisk) },
+      safest:  { durationMin: safeMin || directMin, risk: Math.round(safeRisk || directRisk) },
     };
 
     showOverlay("");

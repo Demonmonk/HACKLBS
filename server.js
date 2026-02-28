@@ -236,13 +236,12 @@ app.get("/api/reverse", async (req, res) => {
 
 // --- Routing proxy (OSRM) ---
 // /api/route?start=lon,lat&end=lon,lat&alternatives=3
+// /api/route?start=lon,lat&via=lon,lat&end=lon,lat   (forced waypoint — no alternatives)
 app.get("/api/route", async (req, res) => {
   try {
     const start = clampStr(req.query.start ?? "", 64);
-    const end = clampStr(req.query.end ?? "", 64);
-    // Accept a numeric count of alternatives (default 3 for best chance of variety)
-    const altParam = Number(req.query.alternatives ?? 3);
-    const alternatives = Number.isFinite(altParam) && altParam > 0 ? Math.min(altParam, 5) : 3;
+    const end   = clampStr(req.query.end   ?? "", 64);
+    const via   = clampStr(req.query.via   ?? "", 64); // optional forced waypoint
 
     const validCoord = (s) =>
       /^-?\d+(\.\d+)?,-?\d+(\.\d+)?$/.test(String(s));
@@ -251,7 +250,18 @@ app.get("/api/route", async (req, res) => {
       return res.status(400).json({ error: "Invalid start/end. Use lon,lat." });
     }
 
-    const key = `route:${start}->${end}:alt=${alternatives}`;
+    // When a waypoint is supplied we force a specific detour — no alternatives needed
+    const useWaypoint = via && validCoord(via);
+    const altParam    = Number(req.query.alternatives ?? 3);
+    const alternatives = useWaypoint
+      ? 0
+      : (Number.isFinite(altParam) && altParam > 0 ? Math.min(altParam, 5) : 3);
+
+    const coordString = useWaypoint
+      ? `${start};${via};${end}`
+      : `${start};${end}`;
+
+    const key = `route:${coordString}:alt=${alternatives}`;
     const cached = cacheGet(key);
     if (cached) return res.json(cached);
 
@@ -259,9 +269,9 @@ app.get("/api/route", async (req, res) => {
 
     for (const base of ROUTING_BACKUPS) {
       const url =
-        `${base}/route/v1/driving/${start};${end}` +
+        `${base}/route/v1/driving/${coordString}` +
         `?overview=full&geometries=geojson&steps=false` +
-        `&alternatives=${alternatives}`;
+        (useWaypoint ? `` : `&alternatives=${alternatives}`);
 
       try {
         const data = await fetchJsonWithTimeout(url, {
