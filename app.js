@@ -237,6 +237,7 @@ function setTab(tabName) {
 
   if (tabName !== "sos") {
     stopSosVoice();
+  }
   if (tabName !== "support") {
     stopVoiceSupport();
   }
@@ -667,6 +668,7 @@ function updateSosTranscript(interim = "") {
   $("sosTranscript").value = combined;
 }
 
+
 function startSosVoice() {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
@@ -675,6 +677,63 @@ function startSosVoice() {
   }
 
   if (!state.sosRecognition) {
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-GB";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    recognition.onresult = (event) => {
+      let interim = "";
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const phrase = result[0].transcript.trim();
+        if (!phrase) continue;
+        if (result.isFinal) {
+          state.sosVoiceFinal = `${state.sosVoiceFinal} ${phrase}`.trim();
+        } else {
+          interim = `${interim} ${phrase}`.trim();
+        }
+      }
+      updateSosTranscript(interim);
+    };
+
+    recognition.onerror = () => {
+      state.sosIsListening = false;
+      setStatus($("sosStatus"), "Voice input error. You can continue by typing.");
+    };
+
+    recognition.onend = () => {
+      if (state.sosIsListening) {
+        recognition.start();
+      }
+    };
+
+    state.sosRecognition = recognition;
+  }
+
+  if (!state.sosVoiceFinal && $("sosTranscript").value.trim()) {
+    state.sosVoiceFinal = $("sosTranscript").value.trim();
+  }
+
+  state.sosIsListening = true;
+  state.sosRecognition.start();
+  setStatus($("sosStatus"), "Listening… speak naturally. Transcript updates live.");
+}
+
+function speakSos() {
+  const text = $("sosOutput").textContent || "";
+  if (!text || text === "(nothing yet)" || text === "(generating…)" || text === "(error)") return;
+  if (!("speechSynthesis" in window)) {
+    setStatus($("sosStatus"), "Speech playback is not available in this browser.");
+    return;
+  }
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.rate = 0.95;
+  window.speechSynthesis.speak(utterance);
+  setStatus($("sosStatus"), "Reading SOS aloud.");
+}
+
 // ---------- AI Support ----------
 
 function getSafetyContextLabel() {
@@ -759,27 +818,6 @@ function startVoiceSupport() {
     recognition.interimResults = true;
 
     recognition.onresult = (event) => {
-      let interim = "";
-      for (let i = event.resultIndex; i < event.results.length; i += 1) {
-        const result = event.results[i];
-        const phrase = result[0].transcript.trim();
-        if (!phrase) continue;
-        if (result.isFinal) {
-          state.sosVoiceFinal = `${state.sosVoiceFinal} ${phrase}`.trim();
-        } else {
-          interim = `${interim} ${phrase}`.trim();
-        }
-      }
-      updateSosTranscript(interim);
-    };
-
-    recognition.onerror = () => {
-      state.sosIsListening = false;
-      setStatus($("sosStatus"), "Voice input error. You can continue by typing.");
-    };
-
-    recognition.onend = () => {
-      if (state.sosIsListening) {
       let transcript = "";
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         transcript += event.results[i][0].transcript;
@@ -798,30 +836,6 @@ function startVoiceSupport() {
       }
     };
 
-    state.sosRecognition = recognition;
-  }
-
-  if (!state.sosVoiceFinal && $("sosTranscript").value.trim()) {
-    state.sosVoiceFinal = $("sosTranscript").value.trim();
-  }
-
-  state.sosIsListening = true;
-  state.sosRecognition.start();
-  setStatus($("sosStatus"), "Listening… speak naturally. Transcript updates live.");
-}
-
-function speakSos() {
-  const text = $("sosOutput").textContent || "";
-  if (!text || text === "(nothing yet)" || text === "(generating…)" || text === "(error)") return;
-  if (!("speechSynthesis" in window)) {
-    setStatus($("sosStatus"), "Speech playback is not available in this browser.");
-    return;
-  }
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.rate = 0.95;
-  window.speechSynthesis.speak(utterance);
-  setStatus($("sosStatus"), "Reading SOS aloud.");
     state.supportRecognition = recognition;
   }
 
@@ -829,6 +843,7 @@ function speakSos() {
   state.supportRecognition.start();
   setStatus($("supportStatus"), "Listening… speak naturally and your words will be transcribed.");
 }
+
 
 function generateSupportResponse() {
   const transcript = $("supportTranscript").value.trim();

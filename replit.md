@@ -1,43 +1,39 @@
 # AegisGrid Hackathon MVP
 
 ## Overview
-A hackathon-friendly prototype focused on personal safety:
-- **Safer routing**: compares OSRM route alternatives and picks the lowest "risk score"
-- **Community reports**: drop pins (broken streetlight / harassment hotspot / etc.) stored in browser localStorage
-- **SOS generator**: produces a shareable emergency message from your live location, with optional OpenAI enhancement
+A personal safety web application that provides safe routing, community hazard reports, and SOS generation. Built as a Node.js/Express app serving both the API backend and static frontend from the same server.
 
 ## Architecture
-Single Node.js/Express server (`server.js`) that serves:
-- Static frontend files (`index.html`, `app.js`, `styles.css`) from the root directory
-- REST API endpoints under `/api/`
-
-**No database** — community reports are stored in browser localStorage only.
+- **Runtime**: Node.js (ESM modules, `"type": "module"`)
+- **Server**: Express.js (`server.js`) — serves static files and API routes
+- **Frontend**: Vanilla JS (`app.js`), HTML (`index.html`), CSS (`styles.css`)
+- **Map**: Leaflet.js with OpenStreetMap tiles
+- **Geocoding**: Nominatim (primary) + geocode.maps.co (fallback)
+- **Routing**: OSRM public demo server with fallback
+- **SOS AI**: OpenAI API (optional, falls back to template if key not set)
 
 ## Key Files
-- `server.js` – Express server + API routes (geocoding proxy, routing proxy, SOS generator)
-- `index.html` – Single-page frontend with Leaflet map
-- `app.js` – Frontend JavaScript logic
-- `styles.css` – Styles
+- `server.js` — Express server, API routes (`/api/geocode`, `/api/reverse`, `/api/route`, `/api/sos`), static file serving
+- `app.js` — Frontend application logic (map, routing, reports, SOS, voice)
+- `index.html` — Main HTML page
+- `styles.css` — Application styles
+- `package.json` — Node.js dependencies
 
 ## Configuration
-Environment variables (set via Replit Secrets/Env Vars):
-- `PORT` – Server port (set to 5000)
-- `NOMINATIM_USER_AGENT` – Required by Nominatim usage policy
-- `OPENAI_API_KEY` – Optional; enables AI-powered SOS generation
-- `OPENAI_MODEL` – Optional; defaults to `gpt-5.2`
-- `OSRM_BASE` – Optional; defaults to public OSRM demo server
+- Port: `5000` (default, or via `PORT` env var)
+- `OPENAI_API_KEY` — Optional, enables AI SOS generation
+- `OPENAI_MODEL` — Optional, defaults to `gpt-5.2`
+- `NOMINATIM_USER_AGENT` — Optional, custom user agent for Nominatim
+- `OSRM_BASE` — Optional, custom OSRM routing server
 
-## External Services
-- **Nominatim** (OpenStreetMap) – geocoding/reverse geocoding
-- **OSRM** (router.project-osrm.org) – routing
-- **OpenAI** – optional AI SOS generation
-
-## Running
-```bash
-npm install
-node server.js
-```
-Server runs on port 5000.
+## Workflow
+- **Start application**: `node server.js` on port 5000 (webview)
 
 ## Deployment
-Configured for autoscale deployment. Run command: `node server.js`
+- Target: autoscale
+- Run: `node server.js`
+
+## Notes
+- Reports are stored in `localStorage` (browser-side only, no backend persistence)
+- Risk scoring is a heuristic based on time-of-day and nearby community reports
+- The app.js had corrupted/interleaved function bodies from the original repo; these were fixed during import
