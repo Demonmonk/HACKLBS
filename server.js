@@ -13,7 +13,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // --- Config ---
-const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
+const PORT = process.env.PORT ? Number(process.env.PORT) : 5000;
 
 // Set these to identify your project to Nominatim (required by their usage policy).
 // Replace with your actual contact info before any public demo/deployment.
