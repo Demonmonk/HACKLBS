@@ -507,50 +507,62 @@ function riskColor(score) {
 
 // ---- Detour waypoint computation ----
 
-// Returns reports within `radiusM` metres of any coord in a route geometry
-function reportsNearRoute(coords, reports, radiusM = 280) {
+// Reports within `radiusM` metres of any point on the route
+function reportsNearRoute(coords, reports, radiusM = 300) {
   const near = new Set();
   for (const r of reports) {
     for (const [lon, lat] of coords) {
-      if (haversineMeters({ lat, lon }, r) <= radiusM) {
-        near.add(r);
-        break;
-      }
+      if (haversineMeters({ lat, lon }, r) <= radiusM) { near.add(r); break; }
     }
   }
   return [...near];
 }
 
-// Weighted centroid of reports (severity = weight)
+// Weighted centroid of a set of reports (weight = severity)
 function dangerCentroid(reports) {
   let wLat = 0, wLon = 0, total = 0;
   for (const r of reports) {
     const w = Number(r.severity) || 2;
-    wLat += r.lat * w;
-    wLon += r.lon * w;
-    total += w;
+    wLat += r.lat * w; wLon += r.lon * w; total += w;
   }
   return total > 0 ? { lat: wLat / total, lon: wLon / total } : null;
 }
 
-// Given a direct route and its nearby danger centroid, compute a waypoint
-// that steers the route AWAY from the danger zone.
-// `offsetDeg` ≈ degrees offset (0.008 ≈ ~700m, adjustable).
-function computeDetourWaypoint(coords, centroid, offsetDeg = 0.009) {
-  // Use the midpoint of the route as the pivot
-  const mid = coords[Math.floor(coords.length / 2)];
-  const [midLon, midLat] = mid;
+// Are two polylines genuinely different?
+// Compare total distance — if they differ by >3% they are different paths.
+function routesAreDifferent(coordsA, coordsB) {
+  const lenA = coordsA.reduce((s, c, i) => {
+    if (i === 0) return 0;
+    const [lo1, la1] = coordsA[i - 1], [lo2, la2] = c;
+    return s + haversineMeters({ lat: la1, lon: lo1 }, { lat: la2, lon: lo2 });
+  }, 0);
+  const lenB = coordsB.reduce((s, c, i) => {
+    if (i === 0) return 0;
+    const [lo1, la1] = coordsB[i - 1], [lo2, la2] = c;
+    return s + haversineMeters({ lat: la1, lon: lo1 }, { lat: la2, lon: lo2 });
+  }, 0);
+  return Math.abs(lenA - lenB) / (lenA || 1) > 0.03;
+}
 
-  // Vector FROM danger centroid TO route midpoint (i.e. away from danger)
-  const dx = midLon - centroid.lon;
-  const dy = midLat - centroid.lat;
-  const len = Math.sqrt(dx * dx + dy * dy) || 0.0001;
-
-  // Normalise and scale to desired offset
-  const waypointLon = midLon + (dx / len) * offsetDeg;
-  const waypointLat = midLat + (dy / len) * offsetDeg;
-
-  return { lat: waypointLat, lon: waypointLon };
+// Generate candidate waypoints in 8 compass directions from the danger centroid.
+// We move OUT from the centroid so the detour physically goes around it.
+function candidateWaypoints(centroid, routeMid, offsets) {
+  const wps = [];
+  // 8 compass offsets (unit vectors)
+  const dirs = [
+    [1, 0], [-1, 0], [0, 1], [0, -1],
+    [0.7, 0.7], [-0.7, 0.7], [0.7, -0.7], [-0.7, -0.7],
+  ];
+  for (const offset of offsets) {
+    for (const [dx, dy] of dirs) {
+      // Place waypoint away from centroid in each direction
+      wps.push({
+        lat: centroid.lat + dy * offset,
+        lon: centroid.lon + dx * offset,
+      });
+    }
+  }
+  return wps;
 }
 
 // Draw a route as coloured segments (heatmap) based on per-point risk.
@@ -633,14 +645,14 @@ async function computeRoutes() {
   const endStr   = `${state.destPos.lon},${state.destPos.lat}`;
 
   try {
-    // ── 1. Always reload latest reports ──
+    // 1. Reload latest reports
     const freshReports = await loadReportsFromServer();
     state.reports = freshReports;
     renderReports();
 
     setStatus($("routeStatus"), "Fetching direct route…");
 
-    // ── 2. Fetch direct route (fastest) ──
+    // 2. Direct (fastest) route
     const directData = await apiGet(
       `/api/route?start=${encodeURIComponent(startStr)}&end=${encodeURIComponent(endStr)}&alternatives=1`
     );
@@ -652,50 +664,57 @@ async function computeRoutes() {
     const directRisk   = routeRisk(directRoute.geometry, state.reports);
     const directMin    = minutes(directRoute.duration);
 
-    // ── 3. Check if any reports lie near the direct route ──
-    const nearbyDanger = reportsNearRoute(directCoords, state.reports, 280);
+    // 3. Find dangerous reports near the direct route
+    const nearbyDanger = reportsNearRoute(directCoords, state.reports, 300);
     const centroid     = dangerCentroid(nearbyDanger);
 
-    let safeCoords = null, safeRisk = 0, safeMin = 0, detourAttempted = false;
+    let bestDetour = null; // { coords, risk, durationMin }
 
     if (centroid && nearbyDanger.length > 0) {
-      setStatus($("routeStatus"), `Found ${nearbyDanger.length} report(s) near your route — computing safe detour…`);
-      detourAttempted = true;
+      setStatus($("routeStatus"),
+        `${nearbyDanger.length} report(s) on your route — searching ${8 * 4} detour options…`
+      );
 
-      // Try progressively larger offsets until we get a meaningfully different route
-      const OFFSETS = [0.008, 0.013, 0.020];
-      for (const offset of OFFSETS) {
-        const wp = computeDetourWaypoint(directCoords, centroid, offset);
+      // 4. Try 8 directions × 4 offsets = 32 waypoint candidates
+      //    Stop as soon as we find a genuinely different route
+      const OFFSETS = [0.010, 0.018, 0.028, 0.040]; // ~1km, 2km, 3km, 4.5km
+      const wps = candidateWaypoints(centroid, directCoords, OFFSETS);
+
+      // Shuffle so we don't always try the same direction first
+      wps.sort(() => Math.random() - 0.5);
+
+      for (const wp of wps) {
         const viaStr = `${wp.lon.toFixed(6)},${wp.lat.toFixed(6)}`;
         try {
-          const detourData = await apiGet(
+          const d = await apiGet(
             `/api/route?start=${encodeURIComponent(startStr)}&via=${encodeURIComponent(viaStr)}&end=${encodeURIComponent(endStr)}`
           );
-          if (detourData.code !== "Ok" || !detourData.routes?.length) continue;
+          if (d.code !== "Ok" || !d.routes?.length) continue;
 
-          const candidate      = detourData.routes[0];
-          const candidateCoords = candidate.geometry.coordinates;
-          const candidateRisk  = routeRisk(candidate.geometry, state.reports);
+          const cCoords = d.routes[0].geometry.coordinates;
+          const cRisk   = routeRisk(d.routes[0].geometry, state.reports);
+          const cMin    = minutes(d.routes[0].duration);
 
-          // Accept this detour if it's at least 5 risk points safer
-          // (even a modest improvement is worth showing)
-          if (candidateRisk < directRisk - 5) {
-            safeCoords = candidateCoords;
-            safeRisk   = candidateRisk;
-            safeMin    = minutes(candidate.duration);
-            break;
+          // Only accept if the geometry is genuinely different from the direct route
+          if (!routesAreDifferent(directCoords, cCoords)) continue;
+
+          // Among all different routes, keep the one with the lowest risk
+          if (!bestDetour || cRisk < bestDetour.risk) {
+            bestDetour = { coords: cCoords, risk: cRisk, durationMin: cMin };
           }
-        } catch { /* try next offset */ }
+
+          // If we found something significantly safer already, stop early
+          if (bestDetour && bestDetour.risk < directRisk - 10) break;
+
+        } catch { /* try next */ }
       }
     }
 
     const hasReports = state.reports.length > 0;
     const allLatLons = [...directCoords.map(([lo, la]) => [la, lo])];
 
-    if (safeCoords) {
-      // ── Two distinct paths: 🔴 fastest (direct) vs 🟢 safest (detour) ──
-
-      // Draw direct/fastest first (red, behind)
+    if (bestDetour) {
+      // ── Two routes: 🔴 direct (fastest) behind, 🟢 safest (detour) in front ──
       const fLayers = drawSolidRoute(directCoords, "#e53935", state.map, {
         clickPopupHtml: `<div class="popup-route">
           <b style="color:#ef9a9a">🔴 Fastest (direct)</b><br/>
@@ -706,44 +725,44 @@ async function computeRoutes() {
       });
       state.routeLayers.push(...fLayers);
 
-      // Draw safe detour on top (heatmap so you see the remaining risk)
-      const sLayers = drawRoute(safeCoords, state.reports, state.map, {
+      const sLayers = drawRoute(bestDetour.coords, state.reports, state.map, {
         clickPopupHtml: `<div class="popup-route">
           <b style="color:#a5d6a7">🟢 Safest (detour)</b><br/>
-          ${escapeHtml(String(safeMin))} min &nbsp;·&nbsp;
-          <span style="color:${riskColor(safeRisk)}">Risk: ${Math.round(safeRisk)}/100 (${riskLabel(safeRisk)})</span><br/>
+          ${escapeHtml(String(bestDetour.durationMin))} min &nbsp;·&nbsp;
+          <span style="color:${riskColor(bestDetour.risk)}">Risk: ${Math.round(bestDetour.risk)}/100 (${riskLabel(bestDetour.risk)})</span><br/>
           <span style="color:#aaa;font-size:11px">🟢 safe · 🟡 moderate · 🔴 near report</span>
         </div>`,
       });
       state.routeLayers.push(...sLayers);
 
-      allLatLons.push(...safeCoords.map(([lo, la]) => [la, lo]));
+      allLatLons.push(...bestDetour.coords.map(([lo, la]) => [la, lo]));
       state.map.fitBounds(L.polyline(allLatLons).getBounds().pad(0.2));
 
-      const extraMin = Math.round((safeMin - directMin) * 10) / 10;
-      const riskSaved = Math.round(directRisk - safeRisk);
+      const extraMin  = Math.round((bestDetour.durationMin - directMin) * 10) / 10;
+      const riskSaved = Math.round(directRisk - bestDetour.risk);
 
       $("fastestKpi").innerHTML =
         `<span style="color:#ef9a9a">🔴</span> ${directMin} min<br/>` +
         `<span style="color:${riskColor(directRisk)};font-size:12px">Risk ${Math.round(directRisk)}/100 — ${riskLabel(directRisk)}</span>`;
 
       $("safestKpi").innerHTML =
-        `<span style="color:#a5d6a7">🟢</span> ${safeMin} min<br/>` +
-        `<span style="color:${riskColor(safeRisk)};font-size:12px">Risk ${Math.round(safeRisk)}/100 — ${riskLabel(safeRisk)}</span>`;
+        `<span style="color:#a5d6a7">🟢</span> ${bestDetour.durationMin} min<br/>` +
+        `<span style="color:${riskColor(bestDetour.risk)};font-size:12px">Risk ${Math.round(bestDetour.risk)}/100 — ${riskLabel(bestDetour.risk)}</span>`;
 
       setStatus($("routeStatus"),
-        `🔴 Direct: ${directMin} min, risk ${Math.round(directRisk)}/100 — passes ${nearbyDanger.length} incident(s). ` +
-        `🟢 Safe detour: ${safeMin} min, risk ${Math.round(safeRisk)}/100 — avoids danger zone` +
-        (extraMin > 0 ? `, adds ${extraMin} min.` : ".")
+        `🔴 Direct: ${directMin} min, risk ${Math.round(directRisk)}/100 (${nearbyDanger.length} incident(s) on route). ` +
+        `🟢 Safe detour: ${bestDetour.durationMin} min, risk ${Math.round(bestDetour.risk)}/100` +
+        (riskSaved > 0 ? ` — ${riskSaved} pts safer` : "") +
+        (extraMin > 0 ? `, +${extraMin} min.` : ".")
       );
 
     } else {
-      // ── Single route (heatmap) — no significant detour possible ──
+      // ── Single heatmap route ──
       const reason = !hasReports
-        ? "No reports yet — add some to enable safe routing."
-        : !detourAttempted
-          ? `Route scores ${Math.round(directRisk)}/100 — no reported danger zones nearby.`
-          : `Detour found no safer alternative (risk difference < 5 points).`;
+        ? "No reports yet — add some on the Report tab to enable safe routing."
+        : nearbyDanger.length === 0
+          ? `No reports within 300m of this route (risk: ${Math.round(directRisk)}/100).`
+          : `Searched 32 detour options — road network forced same path. Try a longer journey.`;
 
       const singleLayers = drawRoute(directCoords, state.reports, state.map, {
         clickPopupHtml: `<div class="popup-route">
@@ -756,7 +775,6 @@ async function computeRoutes() {
         </div>`,
       });
       state.routeLayers.push(...singleLayers);
-
       state.map.fitBounds(L.polyline(allLatLons).getBounds().pad(0.2));
 
       $("fastestKpi").innerHTML =
@@ -767,15 +785,13 @@ async function computeRoutes() {
         `<span style="color:var(--muted);font-size:12px">${escapeHtml(reason)}</span>`;
 
       setStatus($("routeStatus"),
-        hasReports
-          ? `${reason} Route coloured by risk — 🟢 safe · 🟡 moderate · 🔴 near reports.`
-          : reason
+        hasReports ? `${reason} Route coloured by risk.` : reason
       );
     }
 
     state.lastRouteSummary = {
       fastest: { durationMin: directMin, risk: Math.round(directRisk) },
-      safest:  { durationMin: safeMin || directMin, risk: Math.round(safeRisk || directRisk) },
+      safest:  { durationMin: bestDetour?.durationMin ?? directMin, risk: Math.round(bestDetour?.risk ?? directRisk) },
     };
 
     showOverlay("");
