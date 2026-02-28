@@ -19,6 +19,9 @@ const state = {
   selectedReportPos: null,
   reports: [],
   lastRouteSummary: null, // { fastest:{durationMin, risk}, safest:{durationMin, risk} }
+  sosRecognition: null,
+  sosIsListening: false,
+  sosVoiceFinal: "",
   supportRecognition: null,
   supportIsListening: false,
 };
@@ -231,6 +234,8 @@ function setTab(tabName) {
   }
   $(`pane-${tabName}`).classList.remove("hidden");
 
+  if (tabName !== "sos") {
+    stopSosVoice();
   if (tabName !== "support") {
     stopVoiceSupport();
   }
@@ -568,8 +573,10 @@ async function generateSos() {
     // non-fatal
   }
 
-  const situation = $("situation").value.trim();
-  const notes = $("sosNotes").value.trim();
+  const transcript = $("sosTranscript").value.trim();
+  const situation = $("situation").value.trim() || transcript.slice(0, 120);
+  const notesField = $("sosNotes").value.trim();
+  const notes = [notesField, transcript ? `Voice transcript: ${transcript}` : ""].filter(Boolean).join("\n");
 
   // "nearby reports" summary (top few within 150m)
   const nearby = state.reports
@@ -644,6 +651,29 @@ async function shareSos() {
   }
 }
 
+// ---------- SOS Voice ----------
+
+function stopSosVoice() {
+  if (state.sosRecognition && state.sosIsListening) {
+    state.sosRecognition.stop();
+  }
+  state.sosIsListening = false;
+  setStatus($("sosStatus"), "Voice input stopped.");
+}
+
+function updateSosTranscript(interim = "") {
+  const combined = `${state.sosVoiceFinal} ${interim}`.trim();
+  $("sosTranscript").value = combined;
+}
+
+function startSosVoice() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    setStatus($("sosStatus"), "Voice input is not supported in this browser. You can type your details instead.");
+    return;
+  }
+
+  if (!state.sosRecognition) {
 // ---------- AI Support ----------
 
 function getSafetyContextLabel() {
@@ -728,6 +758,27 @@ function startVoiceSupport() {
     recognition.interimResults = true;
 
     recognition.onresult = (event) => {
+      let interim = "";
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const phrase = result[0].transcript.trim();
+        if (!phrase) continue;
+        if (result.isFinal) {
+          state.sosVoiceFinal = `${state.sosVoiceFinal} ${phrase}`.trim();
+        } else {
+          interim = `${interim} ${phrase}`.trim();
+        }
+      }
+      updateSosTranscript(interim);
+    };
+
+    recognition.onerror = () => {
+      state.sosIsListening = false;
+      setStatus($("sosStatus"), "Voice input error. You can continue by typing.");
+    };
+
+    recognition.onend = () => {
+      if (state.sosIsListening) {
       let transcript = "";
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         transcript += event.results[i][0].transcript;
@@ -746,6 +797,30 @@ function startVoiceSupport() {
       }
     };
 
+    state.sosRecognition = recognition;
+  }
+
+  if (!state.sosVoiceFinal && $("sosTranscript").value.trim()) {
+    state.sosVoiceFinal = $("sosTranscript").value.trim();
+  }
+
+  state.sosIsListening = true;
+  state.sosRecognition.start();
+  setStatus($("sosStatus"), "Listening… speak naturally. Transcript updates live.");
+}
+
+function speakSos() {
+  const text = $("sosOutput").textContent || "";
+  if (!text || text === "(nothing yet)" || text === "(generating…)" || text === "(error)") return;
+  if (!("speechSynthesis" in window)) {
+    setStatus($("sosStatus"), "Speech playback is not available in this browser.");
+    return;
+  }
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.rate = 0.95;
+  window.speechSynthesis.speak(utterance);
+  setStatus($("sosStatus"), "Reading SOS aloud.");
     state.supportRecognition = recognition;
   }
 
@@ -810,6 +885,10 @@ function wireUi() {
   $("copySos").addEventListener("click", copySos);
   $("shareSos").addEventListener("click", shareSos);
 
+  // SOS voice
+  $("startSosVoice").addEventListener("click", startSosVoice);
+  $("stopSosVoice").addEventListener("click", stopSosVoice);
+  $("speakSos").addEventListener("click", speakSos);
   // AI Support
   $("startVoiceSupport").addEventListener("click", startVoiceSupport);
   $("stopVoiceSupport").addEventListener("click", stopVoiceSupport);
