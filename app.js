@@ -26,8 +26,6 @@ const state = {
   supportIsListening: false,
 };
 
-const LS_KEY = "aegisgrid_reports_v1";
-
 // ---------- Utilities ----------
 function fmtCoord(lat, lon) {
   return `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
@@ -52,17 +50,20 @@ function safeJsonParse(s, fallback) {
   try { return JSON.parse(s); } catch { return fallback; }
 }
 
-function loadReports() {
-  const raw = localStorage.getItem(LS_KEY);
-  const data = safeJsonParse(raw, []);
-  if (!Array.isArray(data)) return [];
-  return data.filter((r) =>
-    r && Number.isFinite(r.lat) && Number.isFinite(r.lon) && typeof r.category === "string"
-  );
-}
-
-function saveReports(reports) {
-  localStorage.setItem(LS_KEY, JSON.stringify(reports));
+async function loadReportsFromServer() {
+  try {
+    const data = await apiGet("/api/reports");
+    if (!Array.isArray(data)) return [];
+    return data.map((r) => ({
+      ...r,
+      lat: Number(r.lat),
+      lon: Number(r.lon),
+      severity: Number(r.severity),
+      createdAt: Number(r.created_at),
+    })).filter((r) => Number.isFinite(r.lat) && Number.isFinite(r.lon));
+  } catch {
+    return [];
+  }
 }
 
 function setStatus(el, msg) {
@@ -518,7 +519,7 @@ async function computeRoutes() {
 }
 
 // ---------- Reports ----------
-function addReport() {
+async function addReport() {
   const pos = state.selectedReportPos;
   if (!pos) {
     setStatus($("reportStatus"), "Tap the map to select a point first.");
@@ -528,30 +529,32 @@ function addReport() {
   const severity = Number($("severity").value);
   const note = $("note").value.trim();
 
-  const report = {
-    id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2),
-    lat: pos.lat,
-    lon: pos.lon,
-    category,
-    severity,
-    note,
-    createdAt: Date.now(),
-  };
+  setStatus($("reportStatus"), "Saving…");
 
-  state.reports.unshift(report);
-  saveReports(state.reports);
-  renderReports();
+  try {
+    const saved = await apiPost("/api/reports", {
+      lat: pos.lat,
+      lon: pos.lon,
+      category,
+      severity,
+      note,
+    });
 
-  setStatus($("reportStatus"), "Saved locally. Routing risk score will now reflect this.");
-  $("note").value = "";
-}
+    const report = {
+      ...saved,
+      lat: Number(saved.lat),
+      lon: Number(saved.lon),
+      severity: Number(saved.severity),
+      createdAt: Number(saved.created_at),
+    };
 
-function clearReports() {
-  if (!confirm("Clear all locally saved reports in this browser?")) return;
-  state.reports = [];
-  saveReports(state.reports);
-  renderReports();
-  setStatus($("reportStatus"), "Cleared local reports.");
+    state.reports.unshift(report);
+    renderReports();
+    setStatus($("reportStatus"), "Saved! This report is now visible to everyone.");
+    $("note").value = "";
+  } catch (e) {
+    setStatus($("reportStatus"), `Failed to save: ${e.message}`);
+  }
 }
 
 // ---------- SOS ----------
@@ -894,7 +897,6 @@ function wireUi() {
 
   // Reports
   $("saveReport").addEventListener("click", addReport);
-  $("clearReports").addEventListener("click", clearReports);
 
   // SOS
   $("generateSos").addEventListener("click", generateSos);
@@ -905,24 +907,20 @@ function wireUi() {
   $("startSosVoice").addEventListener("click", startSosVoice);
   $("stopSosVoice").addEventListener("click", stopSosVoice);
   $("speakSos").addEventListener("click", speakSos);
-  // AI Support
-  $("startVoiceSupport").addEventListener("click", startVoiceSupport);
-  $("stopVoiceSupport").addEventListener("click", stopVoiceSupport);
-  $("generateSupport").addEventListener("click", generateSupportResponse);
-  $("speakSupport").addEventListener("click", speakSupportResponse);
 }
 
-function boot() {
-  // Load reports first
-  state.reports = loadReports();
-  // Initialize map
+async function boot() {
   initMap();
-  renderReports();
   wireUi();
+  setTab("route");
 
-  // Try to get location automatically (non-blocking)
+  // Load reports from server (non-blocking — renders once done)
+  loadReportsFromServer().then((reports) => {
+    state.reports = reports;
+    renderReports();
+  });
+
   useMyLocation();
-
   showOverlay("");
 }
 

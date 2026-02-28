@@ -33,7 +33,13 @@ A personal safety web application that provides safe routing, community hazard r
 - Target: autoscale
 - Run: `node server.js`
 
+## Database Schema
+- `reports` table: `id` (UUID), `lat`, `lon`, `category`, `severity` (1-3), `note`, `created_at`
+- Reports are stored permanently in PostgreSQL and shared across all users
+- API: `GET /api/reports` (fetch all, newest first, cap 500) and `POST /api/reports`
+
 ## Notes
-- Reports are stored in `localStorage` (browser-side only, no backend persistence)
+- Reports are permanently stored in the PostgreSQL database (shared by all users)
 - Risk scoring is a heuristic based on time-of-day and nearby community reports
+- Tabs: Route, Report, Safety Hub only (SOS + AI Voice and AI Support tabs removed)
 - The app.js had corrupted/interleaved function bodies from the original repo; these were fixed during import
