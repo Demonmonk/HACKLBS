@@ -25,6 +25,11 @@ const NOMINATIM_UA =
 const OSRM_BASE =
   process.env.OSRM_BASE || "https://router.project-osrm.org";
 
+const ROUTING_BACKUPS = [
+  OSRM_BASE,
+  "https://routing.openstreetmap.de/routed-car",
+];
+
 // Optional OpenAI key for SOS generation.
 // If not provided, the app will fall back to a non-AI template.
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -52,15 +57,66 @@ function clampStr(s, maxLen) {
   return s.length > maxLen ? s.slice(0, maxLen) : s;
 }
 
+function normalizeGeocodeResult(r) {
+  const lat = Number(r?.lat);
+  const lon = Number(r?.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+  const display_name = clampStr(String(
+    r?.display_name || r?.formatted || r?.name || "Unknown location"
+  ), 400);
+
+  return {
+    lat: String(lat),
+    lon: String(lon),
+    display_name,
+  };
+}
+
+function summarizeUpstreamBody(text) {
+  const src = String(text || "");
+  const withoutTags = src.replace(/<[^>]+>/g, " ");
+  const compact = withoutTags.replace(/\s+/g, " ").trim();
+  if (!compact) return "empty response";
+  return clampStr(compact, 160);
+}
+
+async function fetchJsonWithTimeout(url, { headers = {}, timeoutMs = 12000 } = {}) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, { headers, signal: controller.signal });
+    const text = await resp.text();
+
+    if (!resp.ok) {
+      const detail = summarizeUpstreamBody(text);
+      throw new Error(`HTTP ${resp.status} ${resp.statusText || ""} (${detail})`.trim());
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new Error("Invalid JSON from upstream provider");
+    }
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 // --- Static site ---
-app.use(express.static(path.join(__dirname, "public")));
+// Support both ./public (documented layout) and repo-root static files.
+const publicDir = path.join(__dirname, "public");
+const rootDir = __dirname;
+
+app.use(express.static(publicDir));
+app.use(express.static(rootDir));
 
 // Health check
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
 });
 
-// --- Geocoding proxy (Nominatim) ---
+// --- Geocoding proxy ---
 app.get("/api/geocode", async (req, res) => {
   try {
     const q = clampStr(req.query.q ?? "", 160).trim();
@@ -70,25 +126,47 @@ app.get("/api/geocode", async (req, res) => {
     const cached = cacheGet(key);
     if (cached) return res.json(cached);
 
-    const url =
-      `https://nominatim.openstreetmap.org/search?format=json&limit=5` +
-      `&q=${encodeURIComponent(q)}`;
-
-    const resp = await fetch(url, {
-      headers: {
-        "User-Agent": NOMINATIM_UA,
-        "Accept-Language": "en",
+    const providers = [
+      {
+        name: "nominatim",
+        url:
+          `https://nominatim.openstreetmap.org/search?format=json&limit=5&q=${encodeURIComponent(q)}`,
+        headers: {
+          "User-Agent": NOMINATIM_UA,
+          "Accept-Language": "en",
+        },
+        mapResults: (data) => Array.isArray(data) ? data : [],
       },
-    });
+      {
+        name: "maps.co",
+        url: `https://geocode.maps.co/search?q=${encodeURIComponent(q)}&limit=5`,
+        headers: {
+          "User-Agent": NOMINATIM_UA,
+        },
+        mapResults: (data) => Array.isArray(data) ? data : [],
+      },
+    ];
 
-    if (!resp.ok) {
-      const text = await resp.text();
-      return res.status(502).json({ error: "Geocode failed", detail: text });
+    const failures = [];
+
+    for (const p of providers) {
+      try {
+        const data = await fetchJsonWithTimeout(p.url, { headers: p.headers });
+        const normalized = p.mapResults(data).map(normalizeGeocodeResult).filter(Boolean);
+        if (normalized.length > 0) {
+          cacheSet(key, normalized);
+          return res.json(normalized);
+        }
+        failures.push(`${p.name}: no results`);
+      } catch (err) {
+        failures.push(`${p.name}: ${String(err)}`);
+      }
     }
 
-    const data = await resp.json();
-    cacheSet(key, data);
-    res.json(data);
+    return res.status(502).json({
+      error: "Geocode failed",
+      detail: failures.join(" | "),
+    });
   } catch (err) {
     res.status(500).json({ error: "Geocode error", detail: String(err) });
   }
@@ -107,26 +185,47 @@ app.get("/api/reverse", async (req, res) => {
     const cached = cacheGet(key);
     if (cached) return res.json(cached);
 
-    const url =
-      `https://nominatim.openstreetmap.org/reverse?format=json` +
-      `&lat=${encodeURIComponent(lat)}` +
-      `&lon=${encodeURIComponent(lon)}`;
-
-    const resp = await fetch(url, {
-      headers: {
-        "User-Agent": NOMINATIM_UA,
-        "Accept-Language": "en",
+    const providers = [
+      {
+        name: "nominatim",
+        url:
+          `https://nominatim.openstreetmap.org/reverse?format=json&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`,
+        headers: {
+          "User-Agent": NOMINATIM_UA,
+          "Accept-Language": "en",
+        },
+        mapResult: (data) => ({ display_name: clampStr(String(data?.display_name || ""), 400) }),
       },
-    });
+      {
+        name: "maps.co",
+        url: `https://geocode.maps.co/reverse?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`,
+        headers: {
+          "User-Agent": NOMINATIM_UA,
+        },
+        mapResult: (data) => ({ display_name: clampStr(String(data?.display_name || data?.formatted || ""), 400) }),
+      },
+    ];
 
-    if (!resp.ok) {
-      const text = await resp.text();
-      return res.status(502).json({ error: "Reverse geocode failed", detail: text });
+    const failures = [];
+
+    for (const p of providers) {
+      try {
+        const data = await fetchJsonWithTimeout(p.url, { headers: p.headers });
+        const mapped = p.mapResult(data);
+        if (mapped.display_name) {
+          cacheSet(key, mapped);
+          return res.json(mapped);
+        }
+        failures.push(`${p.name}: empty address`);
+      } catch (err) {
+        failures.push(`${p.name}: ${String(err)}`);
+      }
     }
 
-    const data = await resp.json();
-    cacheSet(key, data);
-    res.json(data);
+    return res.status(502).json({
+      error: "Reverse geocode failed",
+      detail: failures.join(" | "),
+    });
   } catch (err) {
     res.status(500).json({ error: "Reverse geocode error", detail: String(err) });
   }
@@ -151,23 +250,35 @@ app.get("/api/route", async (req, res) => {
     const cached = cacheGet(key);
     if (cached) return res.json(cached);
 
-    const url =
-      `${OSRM_BASE}/route/v1/driving/${start};${end}` +
-      `?overview=full&geometries=geojson&steps=false` +
-      `&alternatives=${alternatives ? "true" : "false"}`;
+    const failures = [];
 
-    const resp = await fetch(url, {
-      headers: { "User-Agent": "AegisGridHackathon/0.1" },
-    });
+    for (const base of ROUTING_BACKUPS) {
+      const url =
+        `${base}/route/v1/driving/${start};${end}` +
+        `?overview=full&geometries=geojson&steps=false` +
+        `&alternatives=${alternatives ? "true" : "false"}`;
 
-    if (!resp.ok) {
-      const text = await resp.text();
-      return res.status(502).json({ error: "Route failed", detail: text });
+      try {
+        const data = await fetchJsonWithTimeout(url, {
+          headers: { "User-Agent": NOMINATIM_UA },
+          timeoutMs: 15000,
+        });
+
+        if (data?.code === "Ok" && Array.isArray(data?.routes) && data.routes.length > 0) {
+          cacheSet(key, data);
+          return res.json(data);
+        }
+
+        failures.push(`${base}: response missing routes`);
+      } catch (err) {
+        failures.push(`${base}: ${String(err)}`);
+      }
     }
 
-    const data = await resp.json();
-    cacheSet(key, data);
-    res.json(data);
+    return res.status(502).json({
+      error: "Route failed",
+      detail: failures.join(" | "),
+    });
   } catch (err) {
     res.status(500).json({ error: "Route error", detail: String(err) });
   }
@@ -293,7 +404,12 @@ Requirements:
 
 // Catch-all: serve the app
 app.get("*", (_req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
+  const publicIndex = path.join(publicDir, "index.html");
+  const rootIndex = path.join(rootDir, "index.html");
+  res.sendFile(publicIndex, (err) => {
+    if (!err) return;
+    res.sendFile(rootIndex);
+  });
 });
 
 app.listen(PORT, () => {
