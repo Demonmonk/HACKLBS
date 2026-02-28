@@ -19,6 +19,8 @@ const state = {
   selectedReportPos: null,
   reports: [],
   lastRouteSummary: null, // { fastest:{durationMin, risk}, safest:{durationMin, risk} }
+  supportRecognition: null,
+  supportIsListening: false,
 };
 
 const LS_KEY = "aegisgrid_reports_v1";
@@ -228,6 +230,10 @@ function setTab(tabName) {
     pane.classList.add("hidden");
   }
   $(`pane-${tabName}`).classList.remove("hidden");
+
+  if (tabName !== "support") {
+    stopVoiceSupport();
+  }
 
   if (tabName === "report") {
     setStatus($("reportStatus"), "Tip: tap the map to place the report pin.");
@@ -638,6 +644,144 @@ async function shareSos() {
   }
 }
 
+// ---------- AI Support ----------
+
+function getSafetyContextLabel() {
+  if (state.lastRouteSummary?.safest?.risk != null) {
+    return `Current route risk estimate: ${state.lastRouteSummary.safest.risk}/100.`;
+  }
+  return "Route risk estimate unavailable.";
+}
+
+function buildSupportResponse(transcript) {
+  const cleaned = transcript.trim();
+  const lowered = cleaned.toLowerCase();
+
+  const highRiskSignals = ["follow", "attacked", "hurt", "danger", "threat", "weapon", "can't breathe", "kidnap"];
+  const hasHighRiskSignal = highRiskSignals.some((signal) => lowered.includes(signal));
+
+  const opening = hasHighRiskSignal
+    ? "I hear you, and your safety matters right now. If you are in immediate danger, call emergency services right now (UK: 999/112)."
+    : "Thank you for sharing this. You are not overreacting—your safety and feelings matter.";
+
+  const middle = cleaned
+    ? `You said: "${cleaned.slice(0, 260)}${cleaned.length > 260 ? "…" : ""}"`
+    : "I don't have details yet, but we can still take calm, practical safety steps.";
+
+  const context = getSafetyContextLabel();
+
+  const closing = hasHighRiskSignal
+    ? "Prioritize moving toward a populated, well-lit place and contact someone you trust now."
+    : "If it helps, stay on this page, keep your location on, and reach out to a trusted contact while you ground yourself.";
+
+  const response = `${opening}\n\n${middle}\n${context}\n\n${closing}`;
+
+  const steps = hasHighRiskSignal
+    ? [
+      "Move to a safer public location with people nearby.",
+      "Call emergency services (UK: 999/112) and share your location.",
+      "Contact a trusted person and stay on the phone.",
+      "Keep your phone charged and avoid isolated routes.",
+    ]
+    : [
+      "Take 5 slow breaths (inhale 4 sec, exhale 6 sec).",
+      "Name 5 things you can see, 4 you can feel, 3 you can hear.",
+      "Message a trusted person your current location.",
+      "If concern increases, call emergency services immediately.",
+    ];
+
+  return { response, steps };
+}
+
+function clearSupportSteps() {
+  $("supportSteps").innerHTML = "";
+}
+
+function setSupportSteps(steps) {
+  clearSupportSteps();
+  for (const step of steps) {
+    const li = document.createElement("li");
+    li.textContent = step;
+    $("supportSteps").appendChild(li);
+  }
+}
+
+function stopVoiceSupport() {
+  if (state.supportRecognition && state.supportIsListening) {
+    state.supportRecognition.stop();
+  }
+  state.supportIsListening = false;
+  setStatus($("supportStatus"), "Voice input stopped.");
+}
+
+function startVoiceSupport() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    setStatus($("supportStatus"), "Voice input is not supported in this browser. You can type your check-in instead.");
+    return;
+  }
+
+  if (!state.supportRecognition) {
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-GB";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    recognition.onresult = (event) => {
+      let transcript = "";
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        transcript += event.results[i][0].transcript;
+      }
+      $("supportTranscript").value = `${$("supportTranscript").value} ${transcript}`.trim();
+    };
+
+    recognition.onerror = () => {
+      setStatus($("supportStatus"), "Voice input had an error. You can keep typing instead.");
+      state.supportIsListening = false;
+    };
+
+    recognition.onend = () => {
+      if (state.supportIsListening) {
+        recognition.start();
+      }
+    };
+
+    state.supportRecognition = recognition;
+  }
+
+  state.supportIsListening = true;
+  state.supportRecognition.start();
+  setStatus($("supportStatus"), "Listening… speak naturally and your words will be transcribed.");
+}
+
+function generateSupportResponse() {
+  const transcript = $("supportTranscript").value.trim();
+  const { response, steps } = buildSupportResponse(transcript);
+  $("supportOutput").textContent = response;
+  setSupportSteps(steps);
+  setStatus($("supportStatus"), "Support response ready.");
+}
+
+function speakSupportResponse() {
+  const text = $("supportOutput").textContent || "";
+  if (!text || text === "(nothing yet)") {
+    setStatus($("supportStatus"), "Generate a support response first.");
+    return;
+  }
+
+  if (!("speechSynthesis" in window)) {
+    setStatus($("supportStatus"), "Speech playback is not available in this browser.");
+    return;
+  }
+
+  window.speechSynthesis.cancel();
+  const msg = new SpeechSynthesisUtterance(text);
+  msg.rate = 0.95;
+  msg.pitch = 1;
+  window.speechSynthesis.speak(msg);
+  setStatus($("supportStatus"), "Reading support response aloud.");
+}
+
 // ---------- Boot ----------
 function wireUi() {
   // Tabs
@@ -665,6 +809,12 @@ function wireUi() {
   $("generateSos").addEventListener("click", generateSos);
   $("copySos").addEventListener("click", copySos);
   $("shareSos").addEventListener("click", shareSos);
+
+  // AI Support
+  $("startVoiceSupport").addEventListener("click", startVoiceSupport);
+  $("stopVoiceSupport").addEventListener("click", stopVoiceSupport);
+  $("generateSupport").addEventListener("click", generateSupportResponse);
+  $("speakSupport").addEventListener("click", speakSupportResponse);
 }
 
 function boot() {
