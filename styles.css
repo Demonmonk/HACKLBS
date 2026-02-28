@@ -148,6 +148,16 @@ button.danger {
   border-color: rgba(77, 163, 255, 0.35);
   background: rgba(77, 163, 255, 0.08);
 }
+
+.resultButton {
+  width: 100%;
+  text-align: left;
+}
+.resultButton.active,
+.resultButton:focus-visible {
+  border-color: rgba(77, 163, 255, 0.7);
+  background: rgba(77, 163, 255, 0.16);
+}
 .resultTitle { font-weight: 650; }
 .resultMeta { color: var(--muted); font-size: 12px; margin-top: 4px; }
 
