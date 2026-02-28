@@ -360,22 +360,24 @@ async function searchLocation({
   resultsId,
   emptyMessage,
   onSelect,
+  silent = false,
+  renderResults = true,
 }) {
   const q = $(queryInputId).value.trim();
   if (!q) {
-    setStatus($("routeStatus"), emptyMessage);
-    return;
+    if (!silent) setStatus($("routeStatus"), emptyMessage);
+    return [];
   }
 
-  setStatus($("routeStatus"), "Searching…");
+  if (!silent) setStatus($("routeStatus"), "Searching…");
   const container = $(resultsId);
-  container.innerHTML = "";
+  if (renderResults) container.innerHTML = "";
 
   try {
     const results = await apiGet(`/api/geocode?q=${encodeURIComponent(q)}`);
     if (!Array.isArray(results) || results.length === 0) {
-      setStatus($("routeStatus"), "No results.");
-      return;
+      if (!silent) setStatus($("routeStatus"), "No results.");
+      return [];
     }
 
     for (const r of results) {
@@ -389,16 +391,31 @@ async function searchLocation({
         <div class="resultTitle">${escapeHtml(name.split(",")[0] || name)}</div>
         <div class="resultMeta">${escapeHtml(name)}</div>
       `;
-      item.addEventListener("click", () => {
-        onSelect({ lat, lon, name });
-        container.innerHTML = "";
-      });
-      container.appendChild(item);
+      if (renderResults) {
+        item.addEventListener("click", () => {
+          onSelect({ lat, lon, name });
+          container.innerHTML = "";
+        });
+        container.appendChild(item);
+      }
     }
 
-    setStatus($("routeStatus"), `Found ${container.children.length} result(s). Tap to select.`);
+    if (!silent) {
+      const count = renderResults ? container.children.length : results.length;
+      setStatus($("routeStatus"), `Found ${count} result(s). Tap to select.`);
+    }
+    return results
+      .map((r) => {
+        const lat = Number(r.lat);
+        const lon = Number(r.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+        const name = r.display_name || "(unknown)";
+        return { lat, lon, name };
+      })
+      .filter(Boolean);
   } catch (e) {
-    setStatus($("routeStatus"), `Search failed: ${e.message}`);
+    if (!silent) setStatus($("routeStatus"), `Search failed: ${e.message}`);
+    return [];
   }
 }
 
@@ -426,6 +443,126 @@ async function searchDestination() {
       setStatus($("routeStatus"), `Destination set: ${name}`);
     },
   });
+}
+
+function initAutocomplete({ queryInputId, resultsId, emptyMessage, onSelect }) {
+  const input = $(queryInputId);
+  const resultsEl = $(resultsId);
+  let debounceTimer = null;
+  let activeIndex = -1;
+  let suggestions = [];
+  let lastRequest = 0;
+
+  function clearSuggestions() {
+    suggestions = [];
+    activeIndex = -1;
+    resultsEl.innerHTML = "";
+  }
+
+  function applySuggestion(item) {
+    onSelect(item);
+    input.value = item.name;
+    clearSuggestions();
+  }
+
+  function renderSuggestions() {
+    resultsEl.innerHTML = "";
+    for (let i = 0; i < suggestions.length; i += 1) {
+      const s = suggestions[i];
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "resultItem resultButton";
+      if (i === activeIndex) item.classList.add("active");
+      item.innerHTML = `
+        <div class="resultTitle">${escapeHtml(s.name.split(",")[0] || s.name)}</div>
+        <div class="resultMeta">${escapeHtml(s.name)}</div>
+      `;
+      item.addEventListener("click", () => applySuggestion(s));
+      resultsEl.appendChild(item);
+    }
+  }
+
+  async function runLookup() {
+    const q = input.value.trim();
+    if (q.length < 2) {
+      clearSuggestions();
+      return;
+    }
+
+    const reqId = lastRequest + 1;
+    lastRequest = reqId;
+    setStatus($("routeStatus"), "Searching suggestions…");
+
+    const found = await searchLocation({
+      queryInputId,
+      resultsId,
+      emptyMessage,
+      onSelect,
+      silent: true,
+      renderResults: false,
+    });
+
+    if (reqId !== lastRequest) return;
+    suggestions = found.slice(0, 6);
+    activeIndex = suggestions.length ? 0 : -1;
+    renderSuggestions();
+
+    if (!suggestions.length) {
+      setStatus($("routeStatus"), "No matching locations yet. Keep typing or try a broader place name.");
+    } else {
+      setStatus($("routeStatus"), "Suggestions ready. Use arrows + Enter, or tap one.");
+    }
+  }
+
+  input.addEventListener("input", () => {
+    if (debounceTimer) window.clearTimeout(debounceTimer);
+    debounceTimer = window.setTimeout(runLookup, 250);
+  });
+
+  input.addEventListener("keydown", (e) => {
+    if (!suggestions.length) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        runLookup();
+      }
+      return;
+    }
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      activeIndex = Math.min(suggestions.length - 1, activeIndex + 1);
+      renderSuggestions();
+      return;
+    }
+
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      activeIndex = Math.max(0, activeIndex - 1);
+      renderSuggestions();
+      return;
+    }
+
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const picked = suggestions[activeIndex] || suggestions[0];
+      if (picked) applySuggestion(picked);
+      return;
+    }
+
+    if (e.key === "Escape") {
+      clearSuggestions();
+      setStatus($("routeStatus"), "Suggestions hidden.");
+    }
+  });
+
+  input.addEventListener("blur", () => {
+    window.setTimeout(clearSuggestions, 120);
+  });
+
+  return {
+    searchNow: runLookup,
+    clear: clearSuggestions,
+  };
 }
 
 // ---------- Routing ----------
@@ -885,14 +1022,30 @@ function wireUi() {
 
   // Route
   $("useMyLocation").addEventListener("click", useMyLocation);
-  $("startSearch").addEventListener("click", searchStartLocation);
-  $("start").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") searchStartLocation();
+  const startAutocomplete = initAutocomplete({
+    queryInputId: "start",
+    resultsId: "startResults",
+    emptyMessage: "Enter a start location or use your current location.",
+    onSelect: ({ lat, lon, name }) => {
+      setStartMarker(lat, lon, name);
+      state.map.setView([lat, lon], 15);
+      setStatus($("routeStatus"), `Start set: ${name}`);
+    },
   });
-  $("destSearch").addEventListener("click", searchDestination);
-  $("dest").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") searchDestination();
+
+  const destAutocomplete = initAutocomplete({
+    queryInputId: "dest",
+    resultsId: "destResults",
+    emptyMessage: "Enter a destination.",
+    onSelect: ({ lat, lon, name }) => {
+      setDestMarker(lat, lon, name);
+      state.map.setView([lat, lon], 15);
+      setStatus($("routeStatus"), `Destination set: ${name}`);
+    },
   });
+
+  $("startSearch").addEventListener("click", () => startAutocomplete.searchNow());
+  $("destSearch").addEventListener("click", () => destAutocomplete.searchNow());
   $("computeRoutes").addEventListener("click", computeRoutes);
 
   // Reports
