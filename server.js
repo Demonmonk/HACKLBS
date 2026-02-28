@@ -235,12 +235,14 @@ app.get("/api/reverse", async (req, res) => {
 });
 
 // --- Routing proxy (OSRM) ---
-// /api/route?start=lon,lat&end=lon,lat&alternatives=1
+// /api/route?start=lon,lat&end=lon,lat&alternatives=3
 app.get("/api/route", async (req, res) => {
   try {
     const start = clampStr(req.query.start ?? "", 64);
     const end = clampStr(req.query.end ?? "", 64);
-    const alternatives = (req.query.alternatives ?? "1") === "1";
+    // Accept a numeric count of alternatives (default 3 for best chance of variety)
+    const altParam = Number(req.query.alternatives ?? 3);
+    const alternatives = Number.isFinite(altParam) && altParam > 0 ? Math.min(altParam, 5) : 3;
 
     const validCoord = (s) =>
       /^-?\d+(\.\d+)?,-?\d+(\.\d+)?$/.test(String(s));
@@ -259,7 +261,7 @@ app.get("/api/route", async (req, res) => {
       const url =
         `${base}/route/v1/driving/${start};${end}` +
         `?overview=full&geometries=geojson&steps=false` +
-        `&alternatives=${alternatives ? "true" : "false"}`;
+        `&alternatives=${alternatives}`;
 
       try {
         const data = await fetchJsonWithTimeout(url, {

@@ -491,8 +491,18 @@ function routeRisk(routeGeojson, reports) {
 // ---- Routing ----
 function minutes(sec) { return Math.round((sec / 60) * 10) / 10; }
 
-function describeRoute(durationSec, riskScore) {
-  return `${minutes(durationSec)} min · risk ${Math.round(riskScore)}/100`;
+function riskLabel(score) {
+  if (score < 20) return "Low";
+  if (score < 45) return "Moderate";
+  if (score < 65) return "High";
+  return "Very High";
+}
+
+function riskColor(score) {
+  if (score < 20) return "#4caf50";
+  if (score < 45) return "#ffb300";
+  if (score < 65) return "#ff7043";
+  return "#e53935";
 }
 
 async function computeRoutes() {
@@ -506,63 +516,122 @@ async function computeRoutes() {
   }
 
   clearRouteLines();
-  setStatus($("routeStatus"), "Computing routes…");
+  setStatus($("routeStatus"), "Fetching routes…");
   showOverlay("Routing…");
 
   const start = `${state.userPos.lon},${state.userPos.lat}`;
-  const end = `${state.destPos.lon},${state.destPos.lat}`;
+  const end   = `${state.destPos.lon},${state.destPos.lat}`;
 
   try {
+    // Reload fresh reports before scoring so we always have the latest
+    const freshReports = await loadReportsFromServer();
+    state.reports = freshReports;
+    renderReports();
+
     const data = await apiGet(
-      `/api/route?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&alternatives=1`
+      `/api/route?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&alternatives=3`
     );
 
     if (data.code !== "Ok" || !Array.isArray(data.routes) || !data.routes.length) {
-      throw new Error("No routes returned.");
+      throw new Error("No routes returned by the router.");
     }
 
-    const scored = data.routes.map((r) => ({
+    // Score every route returned by OSRM
+    const scored = data.routes.map((r, i) => ({
       route: r,
+      index: i,
       risk: routeRisk(r.geometry, state.reports),
+      durationMin: minutes(r.duration),
     }));
 
+    // Fastest = lowest duration; safest = lowest risk (tie-break: shorter)
     const fastest = [...scored].sort((a, b) => a.route.duration - b.route.duration)[0];
     const safest  = [...scored].sort((a, b) => (a.risk - b.risk) || (a.route.duration - b.route.duration))[0];
 
-    const fastestLine = L.geoJSON(fastest.route.geometry, {
-      style: { color: "#4da3ff", weight: 5, opacity: 0.9 },
-    }).addTo(state.map);
-    fastestLine.bindPopup(`<b>Fastest</b><br/>${escapeHtml(describeRoute(fastest.route.duration, fastest.risk))}`);
-    state.routeLines.fastest = fastestLine;
+    const sameRoute = fastest.index === safest.index;
 
-    const sameRoute = fastest.route === safest.route;
-    let fitLayers = [fastestLine];
-
-    if (!sameRoute) {
-      const safestLine = L.geoJSON(safest.route.geometry, {
-        style: { color: "#4caf50", weight: 5, opacity: 0.9, dashArray: "8 5" },
+    if (sameRoute) {
+      // Draw single route in blue with both labels
+      const line = L.geoJSON(fastest.route.geometry, {
+        style: { color: "#4da3ff", weight: 6, opacity: 0.92 },
       }).addTo(state.map);
-      safestLine.bindPopup(`<b>Safest</b><br/>${escapeHtml(describeRoute(safest.route.duration, safest.risk))}`);
-      state.routeLines.safest = safestLine;
-      fitLayers = [fastestLine, safestLine];
+      line.bindPopup(
+        `<div class="popup-route">
+          <b>Only one route available</b><br/>
+          ${escapeHtml(fastest.durationMin)} min &nbsp;·&nbsp;
+          <span style="color:${riskColor(fastest.risk)}">Risk: ${Math.round(fastest.risk)}/100 (${riskLabel(fastest.risk)})</span>
+        </div>`
+      );
+      state.routeLines.fastest = line;
+      state.routeLines.safest  = null;
+
+      state.map.fitBounds(L.featureGroup([line]).getBounds().pad(0.2));
+
+      $("fastestKpi").innerHTML = `${fastest.durationMin} min<br/><span style="color:${riskColor(fastest.risk)};font-size:12px">Risk ${Math.round(fastest.risk)}/100</span>`;
+      $("safestKpi").innerHTML  = `<span style="color:var(--muted);font-size:13px">${
+        data.routes.length === 1
+          ? "Only 1 route found"
+          : state.reports.length === 0
+            ? "No reports to avoid"
+            : "Same as fastest"
+      }</span>`;
+
+      const noReports = state.reports.length === 0;
+      setStatus($("routeStatus"),
+        data.routes.length === 1
+          ? `Only one route found between these points. ${noReports ? "Add reports to see risk scoring." : `Risk: ${Math.round(fastest.risk)}/100.`}`
+          : `All ${data.routes.length} routes have equal risk — showing fastest. ${noReports ? "Add reports to see avoidance." : `Risk: ${Math.round(fastest.risk)}/100.`}`
+      );
     } else {
-      state.routeLines.safest = null;
+      // Two distinct routes — fastest (red) vs safest (green)
+      const fastestLine = L.geoJSON(fastest.route.geometry, {
+        style: { color: "#e53935", weight: 6, opacity: 0.90 },
+      }).addTo(state.map);
+      fastestLine.bindPopup(
+        `<div class="popup-route">
+          <b style="color:#ef9a9a">🔴 Fastest route</b><br/>
+          ${escapeHtml(String(fastest.durationMin))} min &nbsp;·&nbsp;
+          <span style="color:${riskColor(fastest.risk)}">Risk: ${Math.round(fastest.risk)}/100 (${riskLabel(fastest.risk)})</span>
+        </div>`
+      );
+      state.routeLines.fastest = fastestLine;
+
+      const safestLine = L.geoJSON(safest.route.geometry, {
+        style: { color: "#43a047", weight: 6, opacity: 0.92, dashArray: "10 5" },
+      }).addTo(state.map);
+      safestLine.bindPopup(
+        `<div class="popup-route">
+          <b style="color:#a5d6a7">🟢 Safest route</b><br/>
+          ${escapeHtml(String(safest.durationMin))} min &nbsp;·&nbsp;
+          <span style="color:${riskColor(safest.risk)}">Risk: ${Math.round(safest.risk)}/100 (${riskLabel(safest.risk)})</span>
+        </div>`
+      );
+      state.routeLines.safest = safestLine;
+
+      state.map.fitBounds(L.featureGroup([fastestLine, safestLine]).getBounds().pad(0.2));
+
+      $("fastestKpi").innerHTML = `
+        <span style="color:#ef9a9a">🔴</span> ${fastest.durationMin} min
+        <br/><span style="color:${riskColor(fastest.risk)};font-size:12px">Risk ${Math.round(fastest.risk)}/100 — ${riskLabel(fastest.risk)}</span>
+      `;
+      $("safestKpi").innerHTML = `
+        <span style="color:#a5d6a7">🟢</span> ${safest.durationMin} min
+        <br/><span style="color:${riskColor(safest.risk)};font-size:12px">Risk ${Math.round(safest.risk)}/100 — ${riskLabel(safest.risk)}</span>
+      `;
+
+      const savedTime = Math.round((safest.durationMin - fastest.durationMin) * 10) / 10;
+      const riskDiff  = Math.round(fastest.risk - safest.risk);
+      setStatus($("routeStatus"),
+        `🔴 Fastest (${fastest.durationMin} min, risk ${Math.round(fastest.risk)}) vs 🟢 Safest (${safest.durationMin} min, risk ${Math.round(safest.risk)}). ` +
+        `Safest avoids ${riskDiff} risk points${savedTime > 0 ? `, costs ${savedTime} extra min` : ""}.`
+      );
     }
 
-    state.map.fitBounds(L.featureGroup(fitLayers).getBounds().pad(0.2));
-
-    $("fastestKpi").textContent = describeRoute(fastest.route.duration, fastest.risk);
-    $("safestKpi").textContent  = describeRoute(safest.route.duration, safest.risk);
-
     state.lastRouteSummary = {
-      fastest: { durationMin: minutes(fastest.route.duration), risk: Math.round(fastest.risk) },
-      safest:  { durationMin: minutes(safest.route.duration),  risk: Math.round(safest.risk) },
+      fastest: { durationMin: fastest.durationMin, risk: Math.round(fastest.risk) },
+      safest:  { durationMin: safest.durationMin,  risk: Math.round(safest.risk) },
     };
 
-    setStatus($("routeStatus"), sameRoute
-      ? "Done. One route available; fastest and safest are the same."
-      : `Done. Showing ${data.routes.length} route(s). Blue = fastest, green = safest.`
-    );
     showOverlay("");
   } catch (e) {
     setStatus($("routeStatus"), `Routing failed: ${e.message}`);
