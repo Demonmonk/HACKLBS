@@ -3,8 +3,11 @@ import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import OpenAI from "openai";
+import pg from "pg";
 
 dotenv.config();
+
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -281,6 +284,48 @@ app.get("/api/route", async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: "Route error", detail: String(err) });
+  }
+});
+
+// --- Reports ---
+// GET /api/reports  — fetch all reports (newest first, cap at 500)
+app.get("/api/reports", async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      "SELECT id, lat, lon, category, severity, note, EXTRACT(EPOCH FROM created_at)*1000 AS created_at FROM reports ORDER BY created_at DESC LIMIT 500"
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to load reports", detail: String(err) });
+  }
+});
+
+// POST /api/reports  — save a new report
+app.post("/api/reports", async (req, res) => {
+  try {
+    const body = req.body ?? {};
+    const lat = Number(body.lat);
+    const lon = Number(body.lon);
+    const category = clampStr(body.category ?? "", 100).trim();
+    const severity = Math.max(1, Math.min(3, Math.round(Number(body.severity) || 2)));
+    const note = clampStr(body.note ?? "", 800).trim();
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      return res.status(400).json({ error: "Missing/invalid lat/lon" });
+    }
+    if (!category) {
+      return res.status(400).json({ error: "Missing category" });
+    }
+
+    const { rows } = await pool.query(
+      `INSERT INTO reports (lat, lon, category, severity, note)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, lat, lon, category, severity, note, EXTRACT(EPOCH FROM created_at)*1000 AS created_at`,
+      [lat, lon, category, severity, note]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to save report", detail: String(err) });
   }
 });
 
