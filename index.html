@@ -32,7 +32,12 @@
     </div>
 
     <div class="tabs" role="tablist" aria-label="AegisGrid tabs">
-      <button class="tab active" data-tab="sos" role="tab">Safety Hub</button>
+      <button class="tab active" data-tab="route" role="tab">Route</button>
+      <button class="tab" data-tab="report" role="tab">Report</button>
+      <button class="tab" data-tab="sos" role="tab">Safety Hub</button>
+      <button class="tab" data-tab="sos" role="tab">SOS + AI Voice</button>
+      <button class="tab" data-tab="sos" role="tab">SOS</button>
+      <button class="tab" data-tab="support" role="tab">AI Support</button>
     </div>
   </header>
 
@@ -150,8 +155,9 @@
       </div>
 
       <!-- SOS -->
-      <div class="tabPane" id="pane-sos">
+      <div class="tabPane hidden" id="pane-sos">
         <h2>Safety Hub</h2>
+        <h2>SOS + AI Voice Support</h2>
         <p class="muted">
           Speak or type what is happening. We send your context to the SOS API to generate a shareable SOS message plus immediate safety tips.
         </p>
@@ -197,6 +203,45 @@
 
         <div class="callout">
           <strong>If you are in immediate danger:</strong> call your local emergency number (UK: 999/112).
+        </div>
+      </div>
+
+      <!-- AI SUPPORT -->
+      <div class="tabPane hidden" id="pane-support">
+        <h2>AI Safety Support</h2>
+        <p class="muted">
+          Private check-in space with optional voice input. This is supportive guidance only, not a replacement for emergency services or licensed care.
+        </p>
+
+        <div class="row">
+          <button id="startVoiceSupport" class="primary">Start voice check-in</button>
+          <button id="stopVoiceSupport">Stop listening</button>
+        </div>
+
+        <div class="field">
+          <label for="supportTranscript">What you're experiencing</label>
+          <textarea id="supportTranscript" rows="5" placeholder="Type here or use voice input to describe how you feel and what feels unsafe right now."></textarea>
+        </div>
+
+        <div class="row">
+          <button id="generateSupport" class="primary">Generate support response</button>
+          <button id="speakSupport">Read response aloud</button>
+        </div>
+
+        <div class="muted small" id="supportStatus"></div>
+
+        <div class="card">
+          <div class="muted small">AI support response</div>
+          <pre id="supportOutput" class="pre">(nothing yet)</pre>
+        </div>
+
+        <div class="card">
+          <div class="muted small">Grounding steps you can do now</div>
+          <ul id="supportSteps" class="guidance"></ul>
+        </div>
+
+        <div class="callout">
+          <strong>Need urgent help now?</strong> Call local emergency services (UK: 999/112) or contact a trusted person immediately.
         </div>
       </div>
     </section>
