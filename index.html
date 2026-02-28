@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AegisGrid Hackathon MVP</title>
+
+  <!-- Leaflet (map) -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+    defer
+  ></script>
+
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="header">
+    <div class="brand">
+      <div class="logo">🛡️</div>
+      <div>
+        <div class="title">AegisGrid</div>
+        <div class="subtitle">Hackathon MVP — Safe routing + reports + SOS</div>
+      </div>
+    </div>
+
+    <div class="tabs" role="tablist" aria-label="AegisGrid tabs">
+      <button class="tab active" data-tab="route" role="tab">Route</button>
+      <button class="tab" data-tab="report" role="tab">Report</button>
+      <button class="tab" data-tab="sos" role="tab">SOS</button>
+    </div>
+  </header>
+
+  <main class="main">
+    <section class="panel">
+      <!-- ROUTE -->
+      <div class="tabPane" id="pane-route">
+        <h2>Safer Route</h2>
+        <p class="muted">
+          Demo: compares “fastest” vs “safest” by scoring alternative routes using local reports + time-of-day.
+        </p>
+
+        <div class="field">
+          <label for="dest">Destination</label>
+          <div class="row">
+            <input id="dest" type="text" placeholder="Search a place (e.g., 'King's Cross Station')" />
+            <button id="destSearch">Search</button>
+          </div>
+          <div id="destResults" class="results"></div>
+        </div>
+
+        <div class="field">
+          <div class="row">
+            <button id="useMyLocation">Use my location</button>
+            <button id="computeRoutes" class="primary">Compute routes</button>
+          </div>
+          <div class="muted small" id="routeStatus"></div>
+        </div>
+
+        <div class="card">
+          <div class="row space">
+            <div>
+              <div class="kpiLabel">Fastest</div>
+              <div class="kpi" id="fastestKpi">—</div>
+            </div>
+            <div>
+              <div class="kpiLabel">Safest</div>
+              <div class="kpi" id="safestKpi">—</div>
+            </div>
+          </div>
+          <div class="muted small">
+            Risk score: 0 (low) → 100 (high). This is a hackathon heuristic, not a real safety guarantee.
+          </div>
+        </div>
+
+        <details class="details">
+          <summary>How the hackathon risk score works</summary>
+          <ul>
+            <li>Time-of-day baseline (night is riskier).</li>
+            <li>Nearby user reports increase risk (decays with distance).</li>
+            <li>Safest route = lowest total risk among OSRM alternatives.</li>
+          </ul>
+        </details>
+      </div>
+
+      <!-- REPORT -->
+      <div class="tabPane hidden" id="pane-report">
+        <h2>Report an issue</h2>
+        <p class="muted">
+          Tap the map to place a pin, then submit. Reports update local routing scores instantly.
+        </p>
+
+        <div class="card">
+          <div class="muted small">Selected point</div>
+          <div id="reportPoint" class="mono">Tap the map…</div>
+        </div>
+
+        <div class="field">
+          <label for="category">Category</label>
+          <select id="category">
+            <option>Broken streetlight</option>
+            <option>Harassment hotspot</option>
+            <option>Stalking / followed</option>
+            <option>CCTV not working</option>
+            <option>Unsafe alley / poor visibility</option>
+            <option>Other</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="severity">Severity</label>
+          <input id="severity" type="range" min="1" max="3" value="2" />
+          <div class="muted small">1 = low, 2 = medium, 3 = high</div>
+        </div>
+
+        <div class="field">
+          <label for="note">Optional note</label>
+          <textarea id="note" rows="3" placeholder="What happened / what did you notice?"></textarea>
+        </div>
+
+        <div class="row">
+          <button id="saveReport" class="primary">Save report</button>
+          <button id="clearReports" class="danger">Clear local reports</button>
+        </div>
+
+        <div class="muted small" id="reportStatus"></div>
+
+        <details class="details">
+          <summary>Privacy note</summary>
+          <p>
+            This hackathon MVP stores reports only in your browser (localStorage). No accounts. No server database.
+          </p>
+        </details>
+      </div>
+
+      <!-- SOS -->
+      <div class="tabPane hidden" id="pane-sos">
+        <h2>Emergency SOS</h2>
+        <p class="muted">
+          Generates a shareable SOS message using your location. If a server OpenAI key is configured, it will use AI;
+          otherwise it uses a safe template.
+        </p>
+
+        <div class="field">
+          <label for="situation">Situation</label>
+          <input id="situation" type="text" placeholder="e.g., 'Someone is following me'" />
+        </div>
+
+        <div class="field">
+          <label for="sosNotes">Extra notes (optional)</label>
+          <textarea id="sosNotes" rows="3" placeholder="Anything important: clothing, direction of travel, where you’re headed…"></textarea>
+        </div>
+
+        <div class="row">
+          <button id="generateSos" class="primary">Generate SOS</button>
+          <button id="shareSos">Share</button>
+          <button id="copySos">Copy</button>
+        </div>
+
+        <div class="muted small" id="sosStatus"></div>
+
+        <div class="card">
+          <div class="muted small">Generated SOS</div>
+          <pre id="sosOutput" class="pre">(nothing yet)</pre>
+        </div>
+
+        <div class="card">
+          <div class="muted small">Immediate guidance</div>
+          <ul id="guidanceList" class="guidance"></ul>
+        </div>
+
+        <div class="callout">
+          <strong>If you are in immediate danger:</strong> call your local emergency number (UK: 999/112).
+        </div>
+      </div>
+    </section>
+
+    <section class="mapWrap">
+      <div id="map"></div>
+      <div class="mapOverlay" id="mapOverlay">
+        Loading map…
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="muted small">
+      Hackathon demo only — not a safety guarantee. Inspired by the AegisGrid concept: predictive risk routing + rapid SOS coordination.
+    </div>
+  </footer>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
