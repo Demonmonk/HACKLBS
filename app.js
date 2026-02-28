@@ -235,11 +235,41 @@ function setTab(tabName) {
 }
 
 // ---------- API helpers ----------
+function compactErrorText(text) {
+  return String(text || "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 220);
+}
+
+async function parseApiError(resp) {
+  const text = await resp.text();
+  let message = `Request failed: ${resp.status}`;
+
+  try {
+    const data = JSON.parse(text);
+    if (data && typeof data === "object") {
+      if (data.error && data.detail) {
+        message = `${data.error}. ${compactErrorText(data.detail)}`;
+      } else if (data.error) {
+        message = String(data.error);
+      } else if (data.detail) {
+        message = compactErrorText(data.detail);
+      }
+    }
+  } catch {
+    const compact = compactErrorText(text);
+    if (compact) message = `${message}. ${compact}`;
+  }
+
+  return new Error(message);
+}
+
 async function apiGet(url) {
   const resp = await fetch(url);
   if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(text || `Request failed: ${resp.status}`);
+    throw await parseApiError(resp);
   }
   return resp.json();
 }
@@ -251,8 +281,7 @@ async function apiPost(url, body) {
     body: JSON.stringify(body),
   });
   if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(text || `Request failed: ${resp.status}`);
+    throw await parseApiError(resp);
   }
   return resp.json();
 }
@@ -437,18 +466,25 @@ async function computeRoutes() {
       style: { weight: 5, opacity: 0.9 },
     }).addTo(state.map);
 
-    const safestLine = L.geoJSON(safest.route.geometry, {
-      style: { weight: 5, opacity: 0.9, dashArray: "6 6" },
-    }).addTo(state.map);
-
     fastestLine.bindPopup(`<b>Fastest</b><br/>${escapeHtml(describeRoute(fastest.route.duration, fastest.risk))}`);
-    safestLine.bindPopup(`<b>Safest</b><br/>${escapeHtml(describeRoute(safest.route.duration, safest.risk))}`);
-
     state.routeLines.fastest = fastestLine;
-    state.routeLines.safest = safestLine;
+
+    const sameRoute = fastest.route === safest.route;
+    let fitLayers = [fastestLine];
+
+    if (!sameRoute) {
+      const safestLine = L.geoJSON(safest.route.geometry, {
+        style: { weight: 5, opacity: 0.9, dashArray: "6 6" },
+      }).addTo(state.map);
+      safestLine.bindPopup(`<b>Safest</b><br/>${escapeHtml(describeRoute(safest.route.duration, safest.risk))}`);
+      state.routeLines.safest = safestLine;
+      fitLayers = [fastestLine, safestLine];
+    } else {
+      state.routeLines.safest = null;
+    }
 
     // Fit bounds
-    const group = L.featureGroup([fastestLine, safestLine]);
+    const group = L.featureGroup(fitLayers);
     state.map.fitBounds(group.getBounds().pad(0.2));
 
     // KPIs
@@ -460,7 +496,7 @@ async function computeRoutes() {
       safest: { durationMin: minutes(safest.route.duration), risk: Math.round(safest.risk) },
     };
 
-    setStatus($("routeStatus"), `Done. Showing ${data.routes.length} alternative route(s).`);
+    setStatus($("routeStatus"), sameRoute ? "Done. One route available; fastest and safest are the same." : `Done. Showing ${data.routes.length} alternative route(s).`);
     showOverlay("");
   } catch (e) {
     setStatus($("routeStatus"), `Routing failed: ${e.message}`);
