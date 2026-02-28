@@ -9,6 +9,7 @@ const $ = (id) => document.getElementById(id);
 const state = {
   map: null,
   userMarker: null,
+  startMarker: null,
   destMarker: null,
   reportPickMarker: null,
   reportMarkers: [],
@@ -153,10 +154,21 @@ function initMap() {
   showOverlay("");
 }
 
+function setStartMarker(lat, lon, label = "Start") {
+  state.userPos = { lat, lon, label };
+  if (state.startMarker) state.map.removeLayer(state.startMarker);
+  state.startMarker = L.marker([lat, lon], { title: label || "Start" }).addTo(state.map);
+}
+
 function setUserMarker(lat, lon) {
-  state.userPos = { lat, lon };
   if (state.userMarker) state.map.removeLayer(state.userMarker);
-  state.userMarker = L.marker([lat, lon], { title: "You" }).addTo(state.map);
+  state.userMarker = L.circleMarker([lat, lon], {
+    radius: 8,
+    color: "#4da3ff",
+    weight: 2,
+    fillOpacity: 0.55,
+  }).addTo(state.map);
+  setStartMarker(lat, lon, "Current location");
 }
 
 function setDestMarker(lat, lon, label) {
@@ -246,40 +258,76 @@ async function apiPost(url, body) {
 }
 
 // ---------- Geolocation ----------
+async function reverseLabel(lat, lon) {
+  try {
+    const rev = await apiGet(`/api/reverse?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`);
+    return rev?.display_name || "Current location";
+  } catch {
+    return "Current location";
+  }
+}
+
+function geolocationErrorMessage(err) {
+  const code = err?.code;
+  if (code === 1) return "Location permission denied. Allow location access or search your start location manually.";
+  if (code === 2) return "Location unavailable. Try again outdoors or search your start location manually.";
+  if (code === 3) return "Location request timed out. Try again or search your start location manually.";
+  return `Location error: ${err?.message || "Unknown geolocation error"}`;
+}
+
 async function useMyLocation() {
   setStatus($("routeStatus"), "Getting your location…");
   showOverlay("Requesting location…");
 
   if (!navigator.geolocation) {
-    setStatus($("routeStatus"), "Geolocation not available in this browser.");
+    setStatus($("routeStatus"), "Geolocation not available in this browser. Search your start location manually.");
     showOverlay("");
     return;
   }
 
-  navigator.geolocation.getCurrentPosition(
-    (pos) => {
-      const lat = pos.coords.latitude;
-      const lon = pos.coords.longitude;
-      setUserMarker(lat, lon);
-      state.map.setView([lat, lon], 15);
-      setStatus($("routeStatus"), `Using your location: ${fmtCoord(lat, lon)}`);
-      showOverlay("");
-    },
-    (err) => {
-      setStatus($("routeStatus"), `Location error: ${err.message}`);
-      showOverlay("");
-    },
-    { enableHighAccuracy: true, timeout: 10000 }
-  );
+  const success = async (pos) => {
+    const lat = pos.coords.latitude;
+    const lon = pos.coords.longitude;
+    setUserMarker(lat, lon);
+    const label = await reverseLabel(lat, lon);
+    state.userPos = { lat, lon, label };
+    $("start").value = label;
+    $("startResults").innerHTML = "";
+    state.map.setView([lat, lon], 15);
+    setStatus($("routeStatus"), `Using your current location: ${fmtCoord(lat, lon)}`);
+    showOverlay("");
+  };
+
+  const failure = (err) => {
+    setStatus($("routeStatus"), geolocationErrorMessage(err));
+    showOverlay("");
+  };
+
+  navigator.geolocation.getCurrentPosition(success, failure, {
+    enableHighAccuracy: true,
+    timeout: 15000,
+    maximumAge: 60000,
+  });
 }
 
 // ---------- Destination search ----------
-async function searchDestination() {
-  const q = $("dest").value.trim();
-  if (!q) return;
+
+async function searchLocation({
+  queryInputId,
+  resultsId,
+  emptyMessage,
+  onSelect,
+}) {
+  const q = $(queryInputId).value.trim();
+  if (!q) {
+    setStatus($("routeStatus"), emptyMessage);
+    return;
+  }
 
   setStatus($("routeStatus"), "Searching…");
-  $("destResults").innerHTML = "";
+  const container = $(resultsId);
+  container.innerHTML = "";
+
   try {
     const results = await apiGet(`/api/geocode?q=${encodeURIComponent(q)}`);
     if (!Array.isArray(results) || results.length === 0) {
@@ -287,10 +335,10 @@ async function searchDestination() {
       return;
     }
 
-    const container = $("destResults");
     for (const r of results) {
       const lat = Number(r.lat);
       const lon = Number(r.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
       const name = r.display_name || "(unknown)";
       const item = document.createElement("div");
       item.className = "resultItem";
@@ -299,21 +347,46 @@ async function searchDestination() {
         <div class="resultMeta">${escapeHtml(name)}</div>
       `;
       item.addEventListener("click", () => {
-        setDestMarker(lat, lon, name);
-        state.map.setView([lat, lon], 15);
-        setStatus($("routeStatus"), `Destination set: ${name}`);
+        onSelect({ lat, lon, name });
         container.innerHTML = "";
       });
       container.appendChild(item);
     }
 
-    setStatus($("routeStatus"), `Found ${results.length} result(s). Tap to select.`);
+    setStatus($("routeStatus"), `Found ${container.children.length} result(s). Tap to select.`);
   } catch (e) {
     setStatus($("routeStatus"), `Search failed: ${e.message}`);
   }
 }
 
+async function searchStartLocation() {
+  await searchLocation({
+    queryInputId: "start",
+    resultsId: "startResults",
+    emptyMessage: "Enter a start location or use your current location.",
+    onSelect: ({ lat, lon, name }) => {
+      setStartMarker(lat, lon, name);
+      state.map.setView([lat, lon], 15);
+      setStatus($("routeStatus"), `Start set: ${name}`);
+    },
+  });
+}
+
+async function searchDestination() {
+  await searchLocation({
+    queryInputId: "dest",
+    resultsId: "destResults",
+    emptyMessage: "Enter a destination.",
+    onSelect: ({ lat, lon, name }) => {
+      setDestMarker(lat, lon, name);
+      state.map.setView([lat, lon], 15);
+      setStatus($("routeStatus"), `Destination set: ${name}`);
+    },
+  });
+}
+
 // ---------- Routing ----------
+
 function minutes(sec) {
   return Math.round((sec / 60) * 10) / 10;
 }
@@ -326,7 +399,7 @@ function describeRoute(durationSec, riskScore) {
 
 async function computeRoutes() {
   if (!state.userPos) {
-    setStatus($("routeStatus"), "Set your location first (Use my location).");
+    setStatus($("routeStatus"), "Set a start location first (Use my location or search a start place).");
     return;
   }
   if (!state.destPos) {
@@ -538,6 +611,10 @@ function wireUi() {
 
   // Route
   $("useMyLocation").addEventListener("click", useMyLocation);
+  $("startSearch").addEventListener("click", searchStartLocation);
+  $("start").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") searchStartLocation();
+  });
   $("destSearch").addEventListener("click", searchDestination);
   $("dest").addEventListener("keydown", (e) => {
     if (e.key === "Enter") searchDestination();

@@ -48,6 +48,18 @@
         </p>
 
         <div class="field">
+          <label for="start">Start location</label>
+          <div class="row">
+            <input id="start" type="text" placeholder="Use current location or search a start place" />
+            <button id="startSearch">Search</button>
+          </div>
+          <div class="row">
+            <button id="useMyLocation">Use my location</button>
+          </div>
+          <div id="startResults" class="results"></div>
+        </div>
+
+        <div class="field">
           <label for="dest">Destination</label>
           <div class="row">
             <input id="dest" type="text" placeholder="Search a place (e.g., 'King's Cross Station')" />
@@ -58,7 +70,6 @@
 
         <div class="field">
           <div class="row">
-            <button id="useMyLocation">Use my location</button>
             <button id="computeRoutes" class="primary">Compute routes</button>
           </div>
           <div class="muted small" id="routeStatus"></div>

@@ -53,7 +53,12 @@ function clampStr(s, maxLen) {
 }
 
 // --- Static site ---
-app.use(express.static(path.join(__dirname, "public")));
+// Support both ./public (documented layout) and repo-root static files.
+const publicDir = path.join(__dirname, "public");
+const rootDir = __dirname;
+
+app.use(express.static(publicDir));
+app.use(express.static(rootDir));
 
 // Health check
 app.get("/api/health", (_req, res) => {
@@ -293,7 +298,12 @@ Requirements:
 
 // Catch-all: serve the app
 app.get("*", (_req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
+  const publicIndex = path.join(publicDir, "index.html");
+  const rootIndex = path.join(rootDir, "index.html");
+  res.sendFile(publicIndex, (err) => {
+    if (!err) return;
+    res.sendFile(rootIndex);
+  });
 });
 
 app.listen(PORT, () => {
